@@ -1,0 +1,8 @@
+# 含 ARK_API_KEY 明文，仅本地使用，不提交
+opencode.json
+
+# describe_image 插件转存粘贴图片的临时目录
+.opencode/mcp/doubao-vision/tmp/
+
+# doubao vision MCP 本地密钥
+.opencode/mcp/doubao-vision/.env
