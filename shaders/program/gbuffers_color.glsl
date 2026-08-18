@@ -1,21 +1,29 @@
 // 纯色几何类: gbuffers_basic
-// 与 gbuffers_textured 的区别: 不采样纹理，只输出 gl_Color
+// 非光照几何（选框 / 闪电等）在 deferred 之前绘制，与 gbuffers_textured 同理：
+// 关闭引擎混合，着色器内手动合成打包进 colortex4.rg
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
+#include "/lib/constants.glsl"
 #include "/lib/common.glsl"
 #include "/lib/uniforms.glsl"
+#include "/lib/packing.glsl"
 
 VARYING vec4 vColor;
 
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
-/* DRAWBUFFERS:0 */
+/* DRAWBUFFERS:4 */
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 outMaterial; // colortex4
 
 void main() {
-    outColor = vColor;
+    // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）
+    vec4 previous = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);
+    vec3 previousColor = unpack2x16To4x8(previous.rg).rgb;
+    vec3 color = mix(previousColor, vColor.rgb, vColor.a);
+
+    outMaterial = vec4(pack4x8To2x16(vec4(color, 1.0)), previous.ba);
 }
 
 #endif

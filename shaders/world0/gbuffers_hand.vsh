@@ -1,3 +1,3 @@
 #version 330 compatibility
 #define STAGE_VERTEX
-#include "/program/gbuffers_empty.glsl"
+#include "/program/gbuffers_terrain.glsl"
