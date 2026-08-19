@@ -43,7 +43,7 @@
 | 缓冲 | 格式 | 内容 | 写入者 |
 |---|---|---|---|
 | colortex0 | RGBA16F | 线性场景颜色（deferred_init 反 gamma 初始化；composite_tonemap 后为 tonemap 后的线性显示参考色；光照接入后为光照结果） | deferred_init → 前向类（线性混合）→ composite_tonemap → final |
-| colortex1 | RGBA16F | bloom tile 图集：tile0 = 左上 1/4×1/4（屏幕 1/4 分辨率起步），tile1~4 右侧纵列堆叠边长 1/8~1/64，图集约占缓冲 10% 面积，tile 间隔 4 texel | composite_bloom 链（composite8~12）写入 → composite_bloom_merge（composite13）消费 |
+| colortex1 | R11F_G11F_B10F | bloom tile 图集：tile0 = 左上 1/4×1/4（屏幕 1/4 分辨率起步），tile1~4 右侧纵列堆叠边长 1/8~1/64，图集约占缓冲 10% 面积，tile 间隔 4 texel；无 alpha、无符号 11/11/10 浮点，较 RGBA16F 显存带宽减半（COD 核小负瓣写入钳 0，视觉无损） | composite_bloom 链（composite8~12）写入 → composite_bloom_merge（composite13）消费 |
 | colortex4 | RGBA16 | rg = 打包 albedo（tex × 顶点色，4x8→2x16），ba = 打包高光贴图 RGBA（4x8→2x16，labPBR） | gbuffer 类全量写入；textured / color 手动合成写入 rg |
 | colortex5 | RGBA16 | rg = 八面体编码的观察空间法线（labPBR 贴图法线经导数 cotangent TBN 变换，无 normals 纹理时为导数几何法线），ba = 原始 lmcoord（读取端再重映射） | gbuffer 类 |
 | colortex7 | RGBA16F，clear = false | 杂项数据缓冲：右上角 1 texel = 自适应曝光（r 通道，适应后曝光系数）；其余区域预留给天空盒纹理等杂项数据 | composite_bloom_merge（composite13）角点写入 / 其余透传 → composite_tonemap（composite14）读角点应用 |
@@ -66,7 +66,7 @@
 | 全屏 | `deferred_init` | deferred | 初始化 pass：解包 colortex4 的 albedo，反 gamma 写线性 colortex0；光照核心扩展点 |
 | 全屏 | `composite_bloom` | composite8~12 | bloom 链式下采样金字塔 1/4~1/64 分辨率（BLOOM_LEVEL 0~4 由入口宏定义，c13 同款 1/4 起步）：tile < 本级的像素复制回写、tile = 本级的从上一级（或 colortex0）做 13-tap 高斯下采样（COD AW 核，春雷快速路径同款）写 colortex1 图集、其余 discard；vsh 把 quad 压缩到 tiles 0~本级包围盒只光栅化图集区域；无阈值，整幅 HDR 进金字塔 |
 | 全屏 | `composite_bloom_merge` | composite13 | bloom 上采样合并 + 场景合成：读 colortex1 tile 图集（`getBloom`，5 tile 双线性放大加权平均），乘 `BLOOM_STRENGTH` 与线性 colortex0 相加写回 colortex0（tonemap 前线性域），图集自此被消费；兼自动曝光寄生存储（春v2 同款，不新增 pass）——右上角 1 texel 测 tile4 对数平均亮度（春雷算法）、与上一帧曝光指数平滑写 colortex7 角点，其余像素 colortex7 透传 |
-| 全屏 | `composite_tonemap` | composite14 | 位于 bloom 合成（composite13）之后、final 之前；读线性 colortex0（已含 bloom），乘 colortex7 角点的自适应曝光后做 AgX tonemap（lib/post/tonemap.glsl）写回 |
+| 全屏 | `composite_tonemap` | composite14 | 位于 bloom 合成（composite13）之后、final 之前；读线性 colortex0（已含 bloom），乘 colortex7 角点的自适应曝光（vsh 取一次经 varying 传入，免每像素对角点 texelFetch）后做 AgX tonemap（lib/post/tonemap.glsl）写回 |
 | 全屏 | `final` | final | gamma 矫正（`linearToSrgb`，pow 1/2.2）输出到屏幕；全管线唯一离开线性空间的位置 |
 
 - `program/gbuffers_sky.glsl`、`program/gbuffers_sky_tex.glsl` 已备好未链接（原版直通版本，对应 skybasic / skytextured 入口），重新启用天空时把入口指回即可
@@ -106,7 +106,7 @@
 
 **lib/post/**（后处理）
 
-- `bloom.glsl`：bloom tile 图集布局（`bloomTileRect`，金字塔 1/4~1/64 分辨率、c13 同款 1/4 起步）、链式下采样（`bloomDownsampleTile`，调用 filters.glsl 的 `downsample13Tap`，tap 步长 `BLOOM_BLUR_STEP` 源纹素）、合并入口（`getBloom`，调用 filters.glsl 的 `textureNice`）——**已接入** `composite_bloom` / `composite_bloom_merge`；矩形计算用 `textureSize` 运行时推导、不假设缓冲分辨率（不依赖 size.buffer，低版本 OptiFine 兼容）；性能取舍——下采样 13-tap、上采样 textureNice（单采样）、合并 5 tap 全屏（含场景相加与强度合成）、链 pass 的 vsh 做 quad 压缩只光栅化图集区域（全屏 discard 浪费填充率）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `filters.glsl`
+- `bloom.glsl`：bloom tile 图集布局（`bloomTileRect`，金字塔 1/4~1/64 分辨率、c13 同款 1/4 起步）、链式下采样（`bloomDownsampleTile`，调用 filters.glsl 的 `downsample13Tap`，tap 步长 `BLOOM_BLUR_STEP` 源纹素）、合并入口（`getBloom`，调用 filters.glsl 的 `textureNice`）——**已接入** `composite_bloom` / `composite_bloom_merge`；矩形计算用 `textureSize` 运行时推导、不假设缓冲分辨率（不依赖 size.buffer，低版本 OptiFine 兼容）；性能取舍——下采样 13-tap、上采样 textureNice（单采样）、合并 5 tap 全屏（含场景相加与强度合成）、链 pass 的 vsh 做 quad 压缩只光栅化图集区域（全屏 discard 浪费填充率）、`getBloom` 的 5 个 tile 矩形增量累加推导（每像素一次 `textureSize`、无逐 tile 内层循环，全屏逐像素路径最小化 ALU，`bloomTileRect` 保留给链 pass 与测光）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `filters.glsl`
 - `tonemap.glsl`：AgX tonemap（春雷同款 minimal AgX，`agx` 入口）——**已接入** `composite_tonemap`；末段 pow 2.2 为「回到线性」，输出仍线性；依赖先行 include `constants.glsl`
 - `exposure.glsl`：自动曝光（亮度算法春雷同款、pass 设计春v2 同款）——`exposureTexel` colortex7 右上角槽位、`sceneAverageLuminance` bloom 图集最粗 tile（tile4）上固定 16 点均匀抖动采样核（`EXPOSURE_SAMPLE_KERNEL`，4×4 每单元一个随机点）对数平均、`targetExposure` 0.18 key 直除、`adaptedExposure` 曝光域指数平滑（帧率无关、首帧守卫）、`readAdaptedExposure` 读取端——**已接入** `composite_bloom_merge`（角点测光写入）/ `composite_tonemap`（tonemap 前乘一次）；采样规模与春v2 的 16 点盘采样同档（tile4 内容极低频，估计均值充分），测光成本与分辨率解耦、固定核帧间稳定；测光含天空像素（与两家参考一致）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `bloom.glsl` / `color.glsl`（rgbToLuma）
 
@@ -120,11 +120,11 @@
 - 手动合成类程序（color、beacon 外壳分支；`gbuffers_color_textured` 手动合成版当前未链接）读取正在写入的 colortex4（beacon 外壳还读 colortex5）（texelFetch 当前附件，春雷同款做法），个别驱动上属于未定义行为；高光 ba 通道在混合处随 alpha 衰减；`composite_bloom_merge` 的 colortex7 全屏透传同款（读正在写的附件）
 - 光照：`deferred_init` 读 colortex4/5 + depthtex0 计算后写回；`gbuffers_translucent` 前向共享 `lib/lighting/lighting.glsl`
 - 天空：`gbuffers_sky` 接入 `lib/atmosphere/sky.glsl` 程序化渐变
-- 自动曝光：已接入（春雷亮度算法：tile4 对数平均 + 0.18 key 直除 + 曝光域指数适应；春v2 pass 设计：寄生 composite13、colortex7 右上角单像素、全屏透传 + clear=false 跨帧保值、tonemap 前乘一次）。测光含天空像素（与春雷 / 春v2 一致），当前天空为清除色 0，大面积天空入画会把 avgLum 拉向 `AUTO_EXPOSURE_MIN_LUMINANCE`、曝光明显偏高（地面近过曝），天空接入后自然恢复；骨架期如需画面正常可临时收紧 `targetExposure` 上限（如 4.0）。RGBA16F 半精度下曝光实际被 MIN_LUMINANCE 约束在 ≤ 720，无溢出；适应步长（RATE 2.0 下 60fps 每帧约 3%）远大于半精度 0.1% 量化步长，无卡顿风险
+- 自动曝光：已接入（春雷亮度算法：tile4 对数平均 + 0.18 key 直除 + 曝光域指数适应；春v2 pass 设计：寄生 composite13、colortex7 右上角单像素、全屏透传 + clear=false 跨帧保值、tonemap 前乘一次）。测光含天空像素（与春雷 / 春v2 一致），当前天空为清除色 0，大面积天空入画会把 avgLum 拉向 `AUTO_EXPOSURE_MIN_LUMINANCE`、曝光明显偏高（地面近过曝），天空接入后自然恢复；骨架期如需画面正常可临时收紧 `targetExposure` 上限（如 4.0）。RGBA16F 半精度下曝光实际被 MIN_LUMINANCE 约束在 ≤ 720，无溢出；适应步长（RATE 2.0 下 60fps 每帧约 3%）远大于半精度 0.1% 量化步长，无卡顿风险。composite13 对 colortex7 的全屏透传（约 16B/px）是曝光特性当前主要剩余成本——槽位固定右上角、只能由全屏 pass 写入；未来天空盒等杂项数据进 colortex7 时可整体权衡把槽位移入 bloom 图集包围盒内改由链末级 pass 写入（需测光改源 tile3 规避同 pass 竞争、DRAWBUFFERS 下放入口文件，收益约 30MB/帧@1080p）
 - 无 shadow 阶段：阴影贴图 + PCF 可直接加在 `deferred_init` 内（gbuffer 已有法线与深度）
 - 无雾 / 水下效果：可在 `deferred_init` 与前向程序里基于视距混合 `getSkyColor`
 - composite 编号已用：8~12（bloom 下采样链）、13（bloom 上采样合并）、14（tonemap）；0~7 预留
 - bloom 无阈值（与春雷 / 春 v2 / BSL 等全部参考一致）：整幅 HDR 直接进金字塔，靠亮度自然衰减；当前无光照画面整体呈轻微柔光属预期，光照接入后 HDR 值自动分层；如需阈值可在 `bloomDownsampleTile` 的 k = 0 分支加 soft knee
-- bloom 链每个 pass 重写自己需要的全部 tile（低级 tile 复制回写）：跨 pass 保值对 OptiFine / Iris 的 main/alt 缓冲翻转语义免疫，无需 `flip.*` 配置（春雷靠 `flip.*=false` 累积图集的做法依赖引擎语义细节，本方案规避）；colortex1 为全尺寸缓冲仅图集区域被采样（不用 `size.buffer`，低版本 OptiFine 不支持），后续如需省显存 / 带宽可降级 `R11F_G11F_B10F`（bloom 不需要 alpha）
+- bloom 链每个 pass 重写自己需要的全部 tile（低级 tile 复制回写）：跨 pass 保值对 OptiFine / Iris 的 main/alt 缓冲翻转语义免疫，无需 `flip.*` 配置（春雷靠 `flip.*=false` 累积图集的做法依赖引擎语义细节，本方案规避）；colortex1 为全尺寸缓冲仅图集区域被采样（不用 `size.buffer`，低版本 OptiFine 不支持），已降级 `R11F_G11F_B10F`（无 alpha、无符号 11/11/10 浮点）：显存与带宽减半，COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
 - 半透明实体 / 半透明方块实体（Iris 的 `entities_translucent` / `block_translucent`）沿回退链落到 `entities` / `block` 程序；其引擎混合已随主程序关闭（不再串扰），透明部分暂按不透明写入，正确的半透明表现留待后续显式处理
 - textured / textured_lit / particles / lightning（particles 无入口经 textured_lit 回退，lightning 入口已删除经 textured 回退）改走前向后仍在 deferred 之前绘制，写入的 colortex0 会被 deferred 全屏覆盖（这些几何暂不可见），待后续处理：Iris 可设 `particles.ordering` 调整粒子时机，或 textured 族改回手动合成路线（`program/gbuffers_color_textured.glsl`）

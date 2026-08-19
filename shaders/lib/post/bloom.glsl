@@ -40,14 +40,26 @@ vec3 bloomDownsampleTile(int k, vec2 tileLocal) {
 // 合并入口（composite_bloom_merge 调用）：5 个 tile 经 textureNice 放大加权平均，
 // 返回与场景同量级的泛光颜色；乘 BLOOM_STRENGTH 与场景相加在 composite_bloom_merge 完成
 // （tonemap 前线性域）；除以权重和 3.0（= Σ BLOOM_WEIGHTS）归一；
-// 采样坐标钳制 tile 内缩 1 纹素（吸收 textureNice 的向内弯折），不越出 tile
+// 采样坐标钳制 tile 内缩 1 纹素（吸收 textureNice 的向内弯折），不越出 tile；
+// 矩形用增量累加推导（每像素一次 textureSize、无逐 tile 内层循环——本函数全屏逐像素执行，
+// 逐 tile 调 bloomTileRect 每像素要多付 4 次 textureSize + 5 次 exp2 + 循环开销）
 vec3 getBloom(vec2 screenUv) {
-    vec2 bufTexel = 1.0 / vec2(textureSize(colortex1, 0));
+    vec2 atlasSize = vec2(textureSize(colortex1, 0));
+    vec2 bufTexel = 1.0 / atlasSize;
+    vec2 gap = 4.0 / atlasSize;
+
+    vec2 origin = vec2(0.0);
+    float size = 0.25;
     vec3 bloom = vec3(0.0);
     for (int k = 0; k < BLOOM_TILE_COUNT; k++) {
-        vec4 rect = bloomTileRect(k);
-        vec2 uv = clamp(rect.xy + screenUv * rect.zw, rect.xy + bufTexel, rect.xy + rect.zw - bufTexel);
+        vec2 uv = clamp(origin + screenUv * size, origin + bufTexel, origin + size - bufTexel);
         bloom += textureNice(colortex1, uv) * BLOOM_WEIGHTS[k];
+        if (k == 0) {
+            origin = vec2(0.25 + gap.x, 0.0); // tile1 起自 tile0 右侧
+        } else {
+            origin.y += size + gap.y;         // tile2~4 在右侧纵列向下堆叠
+        }
+        size *= 0.5;
     }
     return bloom / 3.0;
 }
