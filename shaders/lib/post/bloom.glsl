@@ -1,12 +1,18 @@
-// Bloom 工具库：tile 图集布局与链式下采样、textureNice 上采样合并入口
+// Bloom 工具库：tile 图集布局、链式下采样、渐进上采样回卷与合并入口
 // 依赖先行 include：lib/common/globals/constants.glsl（BLOOM_*）、lib/common/globals/uniforms.glsl（colortex0 / colortex1、
-// viewWidth / viewHeight）、lib/common/utils/filters.glsl（textureNice / downsample13Tap）
+// viewWidth / viewHeight）、lib/common/utils/filters.glsl（tentFilter4 / downsample13Tap）
 //
 // 图集布局（缓冲归一化坐标，全尺寸 colortex1，不用 size.buffer——低版本 OptiFine 不支持）：
 //   tile0 = 左上 1/4×1/4（屏幕 1/4 分辨率起步，c13 同款；砍掉 1/2 级省最大头开销），
 //   tile1~4 在其右侧纵向堆叠（边长 1/8、1/16、1/32、1/64），图集仅占缓冲 ~10% 面积
 //   tile 间隔 4 texel，吸收采样半径与奇数分辨率下的分数纹素边界，防串色
 //   每个 tile 都覆盖整个场景（边长逐级减半），所有矩形计算不假设缓冲实际分辨率（textureSize 运行时推导）
+//
+// 双链金字塔（COD AW 式，下采样 composite4~8 + 上采样回卷 composite9~12）：
+//   下采样：tile k = 13-tap 高斯取自上一级（tile0 取自 colortex0），各 tile 存原始金字塔
+//   上采样：tile k = 本级原始内容 × 级权重 + 上一 pass 已合并 tile k+1 的 tent 放大 2 倍相加，
+//           粗级模糊经逐级 tent 累积成连续衰减——单次大倍率双线性放大的菱形网格、
+//           离散半径直接叠加的环状过渡（网格感 / 空隙感）在此结构下不再产生
 #ifndef LIB_BLOOM_GLSL
 #define LIB_BLOOM_GLSL
 
@@ -37,31 +43,32 @@ vec3 bloomDownsampleTile(int k, vec2 tileLocal) {
     return downsample13Tap(colortex1, srcCenter, BLOOM_BLUR_STEP * bufTexel, clampRect);
 }
 
-// 合并入口（composite_bloom_merge 调用）：5 个 tile 经 textureNice 放大加权平均，
-// 返回与场景同量级的泛光颜色；乘 BLOOM_STRENGTH 与场景相加在 composite_bloom_merge 完成
-// （tonemap 前线性域）；除以权重和 3.0（= Σ BLOOM_WEIGHTS）归一；
-// 采样坐标钳制 tile 内缩 1 纹素（吸收 textureNice 的向内弯折），不越出 tile；
-// 矩形用增量累加推导（每像素一次 textureSize、无逐 tile 内层循环——本函数全屏逐像素执行，
-// 逐 tile 调 bloomTileRect 每像素要多付 4 次 textureSize + 5 次 exp2 + 循环开销）
-vec3 getBloom(vec2 screenUv) {
-    vec2 atlasSize = vec2(textureSize(colortex1, 0));
-    vec2 bufTexel = 1.0 / atlasSize;
-    vec2 gap = 4.0 / atlasSize;
+// 计算第 k 级 tile 的金字塔合并结果（composite_bloom_upsample 调用，k = 0~3 目标级，
+// tileLocal = 目标 tile 内容归一化坐标，目标纹素中心自然落在源 2×2 区域的子纹素位置）：
+// 本级原始内容乘级权重 + 上一 pass 已合并 tile k+1 的 tentFilter4 放大 2 倍相加；
+// k = 3 的源 tile4 是唯一未经合并的原始级，乘末级权重后并入。
+// 权重在相加处逐级施加（tile0 由此累积全部级权重，getBloom 统一除以权重和归一）
+vec3 bloomUpsampleTile(int k, vec2 tileLocal) {
+    vec4 rect = bloomTileRect(k);
+    vec4 srcRect = bloomTileRect(k + 1);
+    vec2 bufTexel = 1.0 / vec2(textureSize(colortex1, 0));
+    vec2 srcCenter = srcRect.xy + tileLocal * srcRect.zw;
+    vec4 clampRect = vec4(srcRect.xy + bufTexel * 0.5, srcRect.xy + srcRect.zw - bufTexel * 0.5);
+    vec3 coarse = tentFilter4(colortex1, srcCenter, bufTexel, clampRect);
+    if (k == BLOOM_TILE_COUNT - 2) coarse *= BLOOM_WEIGHTS[BLOOM_TILE_COUNT - 1];
+    vec3 fine = texture(colortex1, rect.xy + tileLocal * rect.zw).rgb;
+    return fine * BLOOM_WEIGHTS[k] + coarse;
+}
 
-    vec2 origin = vec2(0.0);
-    float size = 0.25;
-    vec3 bloom = vec3(0.0);
-    for (int k = 0; k < BLOOM_TILE_COUNT; k++) {
-        vec2 uv = clamp(origin + screenUv * size, origin + bufTexel, origin + size - bufTexel);
-        bloom += textureNice(colortex1, uv) * BLOOM_WEIGHTS[k];
-        if (k == 0) {
-            origin = vec2(0.25 + gap.x, 0.0); // tile1 起自 tile0 右侧
-        } else {
-            origin.y += size + gap.y;         // tile2~4 在右侧纵列向下堆叠
-        }
-        size *= 0.5;
-    }
-    return bloom / 3.0;
+// 合并入口（composite_bloom_merge 调用）：渐进回卷链已把全部级合并进 tile0（composite9~12），
+// 此处仅对 tile0（屏幕 1/4 分辨率）做 tentFilter4 放大 4 倍——单级 4 倍 + tent 无网格伪影，
+// 且全屏合并从旧版 5 tile 各一采样降为 4 tap；除以权重和 3.0（= Σ BLOOM_WEIGHTS，
+// tile0 内已按级加权）归一，返回与场景同量级的泛光颜色
+vec3 getBloom(vec2 screenUv) {
+    vec2 bufTexel = 1.0 / vec2(textureSize(colortex1, 0));
+    vec2 uv = screenUv * 0.25; // tile0 = (0.0, 0.0, 0.25, 0.25)
+    vec4 clampRect = vec4(bufTexel * 0.5, 0.25 - bufTexel * 0.5);
+    return tentFilter4(colortex1, uv, bufTexel, clampRect) / 3.0;
 }
 
 #endif

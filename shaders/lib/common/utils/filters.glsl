@@ -16,6 +16,19 @@ vec3 textureNice(sampler2D src, vec2 uv) {
     return texture(src, uv).rgb;
 }
 
+// 4-tap 对角 tent 上采样核（下采样 13-tap 核的上采样对位工具）：
+// center 处 4 个对角双线性 tap（±tapStep），平均后有效覆盖 ≈3×3 源纹素的平滑邻域——
+// 逐级 2 倍上采样无伪影，大倍率放大不再出现单双线性的菱形网格；
+// center / tapStep 为源纹理归一化坐标，clampRect 同 downsample13Tap（tap 越界钳回边缘）
+vec3 tentFilter4(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {
+    vec3 result = vec3(0.0);
+    result += texture(src, clamp(center + tapStep * vec2(-1.0, -1.0), clampRect.xy, clampRect.zw)).rgb;
+    result += texture(src, clamp(center + tapStep * vec2( 1.0, -1.0), clampRect.xy, clampRect.zw)).rgb;
+    result += texture(src, clamp(center + tapStep * vec2(-1.0,  1.0), clampRect.xy, clampRect.zw)).rgb;
+    result += texture(src, clamp(center + tapStep * vec2( 1.0,  1.0), clampRect.xy, clampRect.zw)).rgb;
+    return result * 0.25;
+}
+
 // 13-tap 下采样核（COD: Advanced Warfare，春雷快速路径同款）：
 // tap 步长由调用方给定（源纹素数 × 源纹素尺寸），配合双线性中点采样，每级覆盖 = ±2×步长纹素
 // center / tapStep 为源纹理归一化坐标；clampRect = (min.xy, max.xy) 源区域半纹素内缩后的钳制范围，tap 越界钳回边缘

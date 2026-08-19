@@ -1,7 +1,7 @@
 // Bloom 上采样合并 pass：composite_bloom_merge（world0/composite13 入口）
-// 读 composite8~12 生成的 colortex1 tile 图集，5 个 tile 各经双线性放大、加权平均
-// （lib/post/bloom.glsl 的 getBloom），乘 BLOOM_STRENGTH 与线性场景 colortex0 相加后写回 colortex0
-// （tonemap 前线性域，与各参考包一致）；tile 图集自此被消费，colortex1 不再写入
+// 读 composite4~12 生成的 colortex1 tile 图集（下采样 + 上采样回卷后的 tile0 = 完整泛光），
+// getBloom 对 tile0 做 tent 放大（lib/post/bloom.glsl），乘 BLOOM_STRENGTH 与线性场景 colortex0
+// 相加后写回 colortex0（tonemap 前线性域，与各参考包一致）；tile 图集自此被消费，colortex1 不再写入
 // 兼自动曝光寄生存储（春v2 composite21 同款 pass 设计，不新增 pass）：colortex7 右上角 1 texel
 // 存适应后曝光——角点像素测图集最粗 tile（tile4）的对数平均亮度（春雷算法，固定 16 点均匀抖动
 // 采样核，lib/post/exposure.glsl）、与角点上一帧曝光指数平滑后写回；其余像素 colortex7 同位置读回原样透传

@@ -18,7 +18,7 @@ const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上
 
 // ---- 缓冲格式 ----
 const int colortex0Format = RGBA16F; // 场景颜色
-const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（链式下采样金字塔，composite8~12 写入，composite13 合并）：无符号浮点 11/11/10、无 alpha，较 RGBA16F 显存带宽减半；COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
+const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（链式下采样 + 渐进上采样金字塔，composite4~12 写入，composite13 合成）：无符号浮点 11/11/10、无 alpha，较 RGBA16F 显存带宽减半；COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
 const int colortex7Format = RGBA16F; // 杂项数据：右上角 1 texel = 自适应曝光，其余区域预留给天空盒纹理等
@@ -38,8 +38,8 @@ const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写
 
 // ---- Bloom（lib/post/bloom.glsl，无阈值，整幅 HDR 直接进金字塔）----
 const float BLOOM_STRENGTH = 0.15; // 泛光合成强度（tonemap 前线性域加法）
-const float BLOOM_BLUR_STEP = 4.0; // 下采样 tap 步长（源纹素数）：每级 5×5 核覆盖 ±此值纹素，控制模糊半径（春雷用 2，4 即半径翻倍）
-const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），getBloom 内除以权重和 3.0 归一
+const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春雷同值）：每级 5×5 核覆盖 ±此值纹素；总模糊半径由上采样回卷逐级累积保证，单级无需大步长（步长 4 在高频画面上跨步混叠，反而给图集带入网格）
+const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile），getBloom 除以权重和 3.0 归一
 
 // ---- Tonemap（lib/post/tonemap.glsl，AgX，春雷同值）----
 const float AGX_ADDITIVE = 0.6;       // AgX 曲线预缩放（与曝光系数各司其职：曝光在 tonemap 前整体乘）

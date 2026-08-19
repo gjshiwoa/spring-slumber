@@ -8,7 +8,7 @@ uniform sampler2D normals;  // 法线贴图（labPBR 约定，rgb 存切线空�
 uniform sampler2D specular; // 高光贴图（labPBR 约定，r = smoothness，g = F0，b = porosity/SSS，a = emissive）
 
 uniform sampler2D colortex0; // 场景主颜色缓冲，deferred_init 初始化、composite_tonemap 与 final 读写
-uniform sampler2D colortex1; // bloom：composite8~12 期间为 tile 图集，composite13 起为上采样合并后的全分辨率 bloom
+uniform sampler2D colortex1; // bloom tile 图集：composite4~8 下采样、composite9~12 上采样回卷（tile0 终态 = 合并后的完整泛光），composite13 消费后不再写入
 uniform sampler2D colortex4; // gbuffer: rg = 打包 albedo（4x8→2x16），ba = 打包高光贴图 RGBA
 uniform sampler2D colortex5; // gbuffer: rg = 八面体观察空间法线，ba = 原始 lmcoord；光照接入后读取
 uniform sampler2D colortex7; // 杂项数据缓冲（clear = false）：右上角 1 texel = 自适应曝光（composite13 写、composite14 读），其余槽位预留
