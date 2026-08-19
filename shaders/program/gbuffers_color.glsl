@@ -7,6 +7,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/jitter.glsl"
 
 VARYING vec4 vColor;
 
@@ -32,7 +33,7 @@ void main() {
 #ifdef STAGE_VERTEX
 
 void main() {
-    gl_Position = ftransform();
+    gl_Position = applyTAAJitter(ftransform()); // TAA 亚像素抖动，composite_taa 统一解析
     vColor = gl_Color;
 }
 

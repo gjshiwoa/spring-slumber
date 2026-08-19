@@ -19,6 +19,8 @@ const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上
 // ---- 缓冲格式 ----
 const int colortex0Format = RGBA16F; // 场景颜色
 const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（链式下采样 + 渐进上采样金字塔，composite4~12 写入，composite13 合成）：无符号浮点 11/11/10、无 alpha，较 RGBA16F 显存带宽减半；COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
+const int  colortex3Format = RGBA16F; // TAA 历史缓冲：rgb = 上帧混合色（线性 HDR），a = 上帧最近片元线性深度（解遮挡置信）
+const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
 const int colortex7Format = RGBA16F; // 杂项数据：右上角 1 texel = 自适应曝光，其余区域预留给天空盒纹理等
@@ -58,6 +60,33 @@ const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
     vec2(0.091, 0.537), vec2(0.356, 0.618), vec2(0.609, 0.555), vec2(0.873, 0.641),
     vec2(0.219, 0.766), vec2(0.473, 0.824), vec2(0.742, 0.779), vec2(0.951, 0.898)
 );
+
+// ---- TAA（lib/common/utils/jitter.glsl + lib/post/taa.glsl）----
+const float TAA_JITTER_SCALE = 1.0;  // jitter 幅度缩放（1.0 = 满幅 ±0.5 px，即 1 px 跨度；降低可换锐度）
+// Halton(2,3) 16 相位序列，像素域 [-0.5, 0.5]（春雷同表）；查表纯 GLSL 实现，不依赖 properties 自定义 uniform（旧版 OptiFine 兼容）
+const vec2 TAA_JITTER_SAMPLES[16] = vec2[16](
+    vec2( 0.0,    -0.16666667), vec2(-0.25,    0.16666667),
+    vec2( 0.25,   -0.38888889), vec2(-0.375,  -0.05555556),
+    vec2( 0.125,   0.27777778), vec2(-0.125,  -0.27777778),
+    vec2( 0.375,   0.05555556), vec2(-0.4375,  0.38888889),
+    vec2( 0.0625, -0.46296296), vec2(-0.1875, -0.12962963),
+    vec2( 0.3125,  0.20370370), vec2(-0.3125, -0.35185185),
+    vec2( 0.1875, -0.01851852), vec2(-0.0625,  0.31481481),
+    vec2( 0.4375, -0.24074074), vec2(-0.46875, 0.09259259)
+);
+const float TAA_HISTORY_SHARPNESS   = 0.65; // 历史 Catmull-Rom 锐化系数（春雷 0.6 / 春v2 低配版 0.8 之间）
+const float TAA_CLIP_GAMMA          = 1.5;  // 方差钳制 γ 基础值（深度置信度高时用）；十字 5-tap 统计较 3×3 盒略粗，γ 抬一档补偿
+const float TAA_CLIP_GAMMA_MAX      = 2.25; // 深度置信度低时的放宽上限（防鬼影，春雷自适应同思路）
+const float TAA_TONEMAP_DOMAIN_MAX  = 0.995; // 钳制盒 Y 通道（tonemap 域 luma）上界帽：高对比边缘 μ+γσ 可越出 1，截到盒面会使 Y>1、逆变换分母变负被 1e-5 地板放大 1e5 倍（边缘极亮爆闪）；0.995 对应工作域 luma ~200，HDR 上限内无损
+const float TAA_BLEND_BASE          = 0.05; // 当前帧基础权重（历史权重 0.95）
+const float TAA_BLEND_MOTION        = 0.02; // 每像素速度的当前帧权重增量（运动收敛）
+const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 深度置信失效（解遮挡）时的当前帧权重增量
+const float TAA_BLEND_MIN           = 0.02; // 当前帧权重下限（历史权重上限 0.98）
+const float TAA_BLEND_HAND_MIN      = 0.1;  // 手部当前帧权重下限（防手部拖影）
+const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）
+const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与纯天空像素的哨兵值（下帧变几何时深度置信自然归零、快速收敛）
+const float TAA_DEPTH_CONF_EDGE0    = 0.02; // 深度置信 smoothstep 下沿（重投影深度 vs 历史 a 通道的相对差）
+const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 
 // ---- 光照（lib/lighting/lighting.glsl，暂未接入）----
 const vec3 SUNLIGHT_COLOR    = vec3(1.00, 0.95, 0.86) * 1.40;

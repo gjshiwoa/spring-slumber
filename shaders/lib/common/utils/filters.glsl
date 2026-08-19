@@ -55,4 +55,45 @@ vec3 downsample13Tap(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {
     return result;
 }
 
+// 5-tap 锐化 Catmull-Rom 重采样（春v2 lib/camera/filter.glsl 的 catmullRom5 同款，SMAA 型锐化参数）：
+// 4 角 + 十字中心共 5 次显式 Lod0 双线性 tap（Jimenez 快速重采样，把 4×4 双三次压成 5 tap），
+// 返回 rgba 全通道重采样结果（TAA 历史：rgb = 颜色、a = 上帧深度随同一组权重一趟带回，免独立采样）；
+// sharpenAmount 为锐化强度（0 = 标准 Catmull-Rom，1 = 最锐；春雷 0.6 / 春v2 低配版 0.8），
+// texSize 显式传入，函数保持无依赖
+vec4 catmullRom5(sampler2D src, vec2 uv, vec2 texSize, float sharpenAmount) {
+    vec2 position = uv * texSize;
+    vec2 centerPosition = floor(position - 0.5) + 0.5;
+    vec2 f = position - centerPosition;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+
+    float c = sharpenAmount; // 不能写成 const：参数初始化 const 违反 GLSL 规范，NVIDIA 前端在 vsh 解析时直接 C1059
+    vec2 w0 =        -c  * f3 +  2.0 * c         * f2 - c * f;
+    vec2 w1 =  (2.0 - c) * f3 - (3.0 - c)        * f2         + 1.0;
+    vec2 w2 = -(2.0 - c) * f3 + (3.0 -  2.0 * c) * f2 + c * f;
+    vec2 w3 =         c  * f3 -                 c * f2;
+
+    vec2 w12 = w1 + w2;
+    vec2 tc12 = (centerPosition + w2 / w12) / texSize;
+    vec2 tc0 = (centerPosition - 1.0) / texSize;
+    vec2 tc3 = (centerPosition + 2.0) / texSize;
+
+    // rgb 与源 a 通道用同一组权重累计，末尾按权重和归一（负瓣可使个别通道轻微过冲，无碍）
+    vec4 result = vec4(0.0);
+    float weightSum = 0.0;
+
+    result += textureLod(src, vec2(tc12.x, tc0.y), 0.0) * (w12.x * w0.y);
+    weightSum += w12.x * w0.y;
+    result += textureLod(src, vec2(tc0.x,  tc12.y), 0.0) * (w0.x * w12.y);
+    weightSum += w0.x * w12.y;
+    result += textureLod(src, vec2(tc12.x, tc12.y), 0.0) * (w12.x * w12.y);
+    weightSum += w12.x * w12.y;
+    result += textureLod(src, vec2(tc3.x,  tc12.y), 0.0) * (w3.x * w12.y);
+    weightSum += w3.x * w12.y;
+    result += textureLod(src, vec2(tc12.x, tc3.y), 0.0) * (w12.x * w3.y);
+    weightSum += w12.x * w3.y;
+
+    return result / weightSum;
+}
+
 #endif

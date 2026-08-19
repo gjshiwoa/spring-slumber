@@ -13,6 +13,7 @@
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/jitter.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
@@ -53,7 +54,7 @@ void main() {
 #ifdef STAGE_VERTEX
 
 void main() {
-    gl_Position = ftransform();
+    gl_Position = applyTAAJitter(ftransform()); // TAA 亚像素抖动，composite_taa 统一解析
     vViewPos = (gl_ModelViewMatrix * gl_Vertex).xyz;
     vTexCoord = gl_MultiTexCoord0.xy;
     vColor = gl_Color;
