@@ -1,16 +1,25 @@
 // 自动曝光工具库：亮度算法参考春雷 passes/08_composite/auto_exposure.glsl
 // （bloom 图集最粗 tile 16 点均匀采样对数平均 + 0.18 key 直除 + 曝光域指数时间适应），
-// pass 设计参考春v2 program/composite21.glsl（寄生 bloom 合并 pass 测光、单像素存储、
-// 全屏透传跨帧保值，无 flip.* 依赖；春雷的 compute / SSBO 载体与本项目 GLSL 330 低配定位不符，只搬算法不搬载体）
+// pass 设计参考春v2 program/composite21.glsl（寄生 bloom 链 pass 测光、单像素存储、
+// 写入区域透传跨帧保值，无 flip.* 依赖；春雷的 compute / SSBO 载体与本项目 GLSL 330 低配定位不符，只搬算法不搬载体）
 // 依赖先行 include：lib/common/globals/constants.glsl（AUTO_EXPOSURE_*）、
-// lib/common/globals/uniforms.glsl（colortex1 / colortex7 / frameTime / viewWidth / viewHeight）、
+// lib/common/globals/uniforms.glsl（colortex1 / colortex7 / frameTime）、
 // lib/post/bloom.glsl（bloomTileRect / BLOOM_TILE_COUNT）、lib/common/utils/color.glsl（rgbToLuma）
 #ifndef LIB_EXPOSURE_GLSL
 #define LIB_EXPOSURE_GLSL
 
-// colortex7 右上角 1 texel：自适应曝光槽位（杂项缓冲的第一个槽）
+// colortex7 曝光槽位（杂项缓冲的第一个槽）：bloom 图集包围盒内、tile3 与 tile4 之间的
+// 横向间隔中央——写入者 composite_bloom_upsample（composite12，上采样链末级）只光栅化
+// 图集包围盒，槽位落在包围盒内即可随链写入、无需为测光单开全屏 pass（原右上角方案要求
+// 写入者全屏光栅化，colortex7 全屏透传 ~16B/px 的成本由此消除）；间隔 texel 不属于任何
+// tile，与图集数据无耦合；坐标由 bloomTileRect 运行时推导、不假设缓冲分辨率，
+// 写入端（composite12）与读取端（composite_taa / final）共用本函数，位置恒一致
 ivec2 exposureTexel() {
-    return ivec2(viewWidth, viewHeight) - 1;
+    ivec2 atlasSize = textureSize(colortex1, 0);
+    vec4 t4 = bloomTileRect(BLOOM_TILE_COUNT - 1);
+    vec2 origin = t4.xy * atlasSize; // tile4 原点（texel 域，含分数部分）
+    return ivec2(origin.x + t4.z * float(atlasSize.x) * 0.5, // 列内水平居中
+                 origin.y - 2.0);                             // 间隔中央（间隔 4 texel，两侧各余 ≥1 texel）
 }
 
 // 场景平均亮度（春雷同款对数平均）：在 bloom 图集最粗 tile（tile4，1/64 分辨率低频 HDR）上
@@ -40,7 +49,7 @@ float targetExposure(float avgLum) {
     return clamp(AUTO_EXPOSURE_KEY_VALUE / avgLum, 1e-7, 1e7);
 }
 
-// 时间适应（春雷同款指数平滑，帧率无关）：读 colortex7 角点上一帧曝光向目标推进；
+// 时间适应（春雷同款指数平滑，帧率无关）：读 colortex7 槽位上一帧曝光向目标推进；
 // 曝光域平滑 = 亮度等比变化时按 EV stop 均匀收敛，符合人眼明暗适应；
 // prev <= 0（首帧 / 重载后的 clear color）直接取目标
 float adaptedExposure(float target) {
@@ -49,7 +58,7 @@ float adaptedExposure(float target) {
     return mix(prev, target, 1.0 - exp(-frameTime * AUTO_EXPOSURE_RATE));
 }
 
-// 读取端（composite_tonemap 应用曝光用）：本帧已适应的曝光系数
+// 读取端（composite_taa 钳制域归一化乘上一帧值 / final 应用本帧值）：已适应的曝光系数
 float readAdaptedExposure() {
     return texelFetch(colortex7, exposureTexel(), 0).r;
 }

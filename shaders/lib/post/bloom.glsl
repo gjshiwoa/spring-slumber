@@ -60,7 +60,7 @@ vec3 bloomUpsampleTile(int k, vec2 tileLocal) {
     return fine * BLOOM_WEIGHTS[k] + coarse;
 }
 
-// 合并入口（composite_bloom_merge 调用）：渐进回卷链已把全部级合并进 tile0（composite9~12），
+// 合并入口（final 调用）：渐进回卷链已把全部级合并进 tile0（composite9~12），
 // 此处仅对 tile0（屏幕 1/4 分辨率）做 tentFilter4 放大 4 倍——单级 4 倍 + tent 无网格伪影，
 // 且全屏合并从旧版 5 tile 各一采样降为 4 tap；除以权重和 3.0（= Σ BLOOM_WEIGHTS，
 // tile0 内已按级加权）归一，返回与场景同量级的泛光颜色

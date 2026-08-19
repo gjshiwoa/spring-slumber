@@ -18,13 +18,13 @@ const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上
 
 // ---- 缓冲格式 ----
 const int colortex0Format = RGBA16F; // 场景颜色
-const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（链式下采样 + 渐进上采样金字塔，composite4~12 写入，composite13 合成）：无符号浮点 11/11/10、无 alpha，较 RGBA16F 显存带宽减半；COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
+const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（链式下采样 + 渐进上采样金字塔，composite4~12 写入，final 合成）：无符号浮点 11/11/10、无 alpha，较 RGBA16F 显存带宽减半；COD 下采样核的小负瓣写入时钳 0，bloom 视觉无损
 const int  colortex3Format = RGBA16F; // TAA 历史缓冲：rgb = 上帧混合色（线性 HDR），a = 上帧最近片元线性深度（解遮挡置信）
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
-const int colortex7Format = RGBA16F; // 杂项数据：右上角 1 texel = 自适应曝光，其余区域预留给天空盒纹理等
-const bool colortex7Clear = false;   // 曝光值跨帧存活；colortex7 写入者须全屏透传不属于自己的区域（见 lib/post/exposure.glsl）
+const int colortex7Format = RGBA16F; // 杂项数据：曝光槽位 1 texel（bloom 图集包围盒内 tile3/tile4 间隔，exposure.glsl 的 exposureTexel）= 自适应曝光，其余区域预留给天空盒纹理等
+const bool colortex7Clear = false;   // 曝光值跨帧存活；colortex7 写入者须透传其光栅化区域内非槽位像素（composite12 = 图集包围盒整写，见 lib/post/exposure.glsl）
 
 // ---- 天空颜色（lib/atmosphere/sky.glsl，暂未接入）----
 const vec3 DAY_ZENITH    = vec3(0.080, 0.220, 0.620);
@@ -52,7 +52,7 @@ const float max_ev       = 4.026069;  // AgX log2 窗口上界
 const float AUTO_EXPOSURE_RATE          = 2.0;     // 适应速度（1/s）：mix 因子 1 - exp(-frameTime * RATE)，帧率无关
 const float AUTO_EXPOSURE_KEY_VALUE     = 0.18;    // 目标亮度（18% 灰 key），targetExposure = KEY / avgLum
 const float AUTO_EXPOSURE_MIN_LUMINANCE = 0.00025; // log 下限保护，兼把曝光上限约束到 KEY / 此值 = 720（半精度安全）
-const int EXPOSURE_SAMPLE_COUNT = 16;              // 测光采样数：角点 fragment 的测光成本与分辨率解耦（全遍历在 4K 下 2000+ fetch）
+const int EXPOSURE_SAMPLE_COUNT = 16;              // 测光采样数：槽位 fragment 的测光成本与分辨率解耦（全遍历在 4K 下 2000+ fetch）
 // 均匀随机采样核：4×4 抖动网格（每单元一个随机点），全域覆盖、无聚集，读取端映射回 tile4；固定核保证帧间稳定
 const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
     vec2(0.063, 0.061), vec2(0.302, 0.106), vec2(0.574, 0.038), vec2(0.811, 0.152),

@@ -8,7 +8,7 @@
 // 十字不含对角，仅对角有几何的单像素角点（叶尖等）保护带缺角，c13 / Photon 同款取舍：
 // 非天空最坏 1+5+5+5 = 16 fetch，天空内部 6 fetch（5 深度 + 1 颜色）
 // 钳制域曝光归一化（春雷同思路）：统计 / 钳制 / 混合在「线性色 × 上一帧自适应曝光」的工作域进行、
-// 结果除回后输出与存储——本管线曝光在 composite14 才应用（tonemap 前乘一次），colortex0 的原始值在
+// 结果除回后输出与存储——本管线曝光在 final 才应用（tonemap 前乘一次），colortex0 的原始值在
 // 暗景下极小，tonemap c/(1+luma) 近似恒等、σ 跌破 extents 的 1e-5 地板会使钳制盒退化成「不钳」→
 // 历史以 95% 权重原样存活 → 低亮度拖影；乘曝光后工作域稳定在 ~0.2-1，与场景亮度无关
 // 依赖先行 include：constants.glsl（TAA_* 常量）、uniforms.glsl（colortex0/3、depthtex0、视口、
@@ -180,7 +180,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     bool offscreen = any(lessThan(historyUv, vec2(0.0))) || any(greaterThan(historyUv, vec2(1.0)));
     if (offscreen || frameCounter == 0) blend = 1.0;
 
-    // 除回归一化曝光：输出与历史存储均回到未曝光的线性域（曝光由 composite_tonemap 统一应用）
+    // 除回归一化曝光：输出与历史存储均回到未曝光的线性域（曝光由 final 统一应用）
     return max(mix(historyWorking, currentColor, blend) / exposure, vec3(0.0));
 }
 
