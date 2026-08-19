@@ -49,6 +49,14 @@ const float max_ev       = 4.026069;  // AgX log2 窗口上界
 const float AUTO_EXPOSURE_RATE          = 2.0;     // 适应速度（1/s）：mix 因子 1 - exp(-frameTime * RATE)，帧率无关
 const float AUTO_EXPOSURE_KEY_VALUE     = 0.18;    // 目标亮度（18% 灰 key），targetExposure = KEY / avgLum
 const float AUTO_EXPOSURE_MIN_LUMINANCE = 0.00025; // log 下限保护，兼把曝光上限约束到 KEY / 此值 = 720（半精度安全）
+const int EXPOSURE_SAMPLE_COUNT = 16;              // 测光采样数：角点 fragment 的测光成本与分辨率解耦（全遍历在 4K 下 2000+ fetch）
+// 均匀随机采样核：4×4 抖动网格（每单元一个随机点），全域覆盖、无聚集，读取端映射回 tile4；固定核保证帧间稳定
+const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
+    vec2(0.063, 0.061), vec2(0.302, 0.106), vec2(0.574, 0.038), vec2(0.811, 0.152),
+    vec2(0.148, 0.306), vec2(0.421, 0.273), vec2(0.687, 0.342), vec2(0.934, 0.289),
+    vec2(0.091, 0.537), vec2(0.356, 0.618), vec2(0.609, 0.555), vec2(0.873, 0.641),
+    vec2(0.219, 0.766), vec2(0.473, 0.824), vec2(0.742, 0.779), vec2(0.951, 0.898)
+);
 
 // ---- 光照（lib/lighting/lighting.glsl，暂未接入）----
 const vec3 SUNLIGHT_COLOR    = vec3(1.00, 0.95, 0.86) * 1.40;

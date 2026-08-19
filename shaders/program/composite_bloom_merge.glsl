@@ -3,8 +3,8 @@
 // （lib/post/bloom.glsl 的 getBloom），乘 BLOOM_STRENGTH 与线性场景 colortex0 相加后写回 colortex0
 // （tonemap 前线性域，与各参考包一致）；tile 图集自此被消费，colortex1 不再写入
 // 兼自动曝光寄生存储（春v2 composite21 同款 pass 设计，不新增 pass）：colortex7 右上角 1 texel
-// 存适应后曝光——角点像素测图集最粗 tile（tile4）的对数平均亮度（春雷算法，lib/post/exposure.glsl）、
-// 与角点上一帧曝光指数平滑后写回；其余像素 colortex7 同位置读回原样透传
+// 存适应后曝光——角点像素测图集最粗 tile（tile4）的对数平均亮度（春雷算法，固定 16 点均匀抖动
+// 采样核，lib/post/exposure.glsl）、与角点上一帧曝光指数平滑后写回；其余像素 colortex7 同位置读回原样透传
 // （colortex7Clear = false + 每帧全屏透传跨帧保值，对 main/alt 翻转免疫，后续杂项槽位同理共存）；
 // composite_tonemap 读角点在 AgX 前乘一次。vsh 保持全屏（merge 须覆盖全屏，角点 fragment 恒存在）
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半

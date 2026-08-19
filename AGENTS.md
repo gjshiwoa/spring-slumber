@@ -108,7 +108,7 @@
 
 - `bloom.glsl`：bloom tile 图集布局（`bloomTileRect`，金字塔 1/4~1/64 分辨率、c13 同款 1/4 起步）、链式下采样（`bloomDownsampleTile`，调用 filters.glsl 的 `downsample13Tap`，tap 步长 `BLOOM_BLUR_STEP` 源纹素）、合并入口（`getBloom`，调用 filters.glsl 的 `textureNice`）——**已接入** `composite_bloom` / `composite_bloom_merge`；矩形计算用 `textureSize` 运行时推导、不假设缓冲分辨率（不依赖 size.buffer，低版本 OptiFine 兼容）；性能取舍——下采样 13-tap、上采样 textureNice（单采样）、合并 5 tap 全屏（含场景相加与强度合成）、链 pass 的 vsh 做 quad 压缩只光栅化图集区域（全屏 discard 浪费填充率）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `filters.glsl`
 - `tonemap.glsl`：AgX tonemap（春雷同款 minimal AgX，`agx` 入口）——**已接入** `composite_tonemap`；末段 pow 2.2 为「回到线性」，输出仍线性；依赖先行 include `constants.glsl`
-- `exposure.glsl`：自动曝光（亮度算法春雷同款、pass 设计春v2 同款）——`exposureTexel` colortex7 右上角槽位、`sceneAverageLuminance` bloom 图集最粗 tile（tile4）全纹素对数平均、`targetExposure` 0.18 key 直除、`adaptedExposure` 曝光域指数平滑（帧率无关、首帧守卫）、`readAdaptedExposure` 读取端——**已接入** `composite_bloom_merge`（角点测光写入）/ `composite_tonemap`（tonemap 前乘一次）；测光含天空像素（与两家参考一致）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `bloom.glsl` / `color.glsl`（rgbToLuma）
+- `exposure.glsl`：自动曝光（亮度算法春雷同款、pass 设计春v2 同款）——`exposureTexel` colortex7 右上角槽位、`sceneAverageLuminance` bloom 图集最粗 tile（tile4）上固定 16 点均匀抖动采样核（`EXPOSURE_SAMPLE_KERNEL`，4×4 每单元一个随机点）对数平均、`targetExposure` 0.18 key 直除、`adaptedExposure` 曝光域指数平滑（帧率无关、首帧守卫）、`readAdaptedExposure` 读取端——**已接入** `composite_bloom_merge`（角点测光写入）/ `composite_tonemap`（tonemap 前乘一次）；采样规模与春v2 的 16 点盘采样同档（tile4 内容极低频，估计均值充分），测光成本与分辨率解耦、固定核帧间稳定；测光含天空像素（与两家参考一致）；依赖先行 include `constants.glsl` / `uniforms.glsl` / `bloom.glsl` / `color.glsl`（rgbToLuma）
 
 ## 当前状态
 
