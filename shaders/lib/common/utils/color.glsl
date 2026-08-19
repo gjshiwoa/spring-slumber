@@ -12,4 +12,9 @@ vec3 linearToSrgb(vec3 color) {
     return pow(color, vec3(1.0 / 2.2));
 }
 
+// Rec.709 相对亮度（春雷 RGBToLuma 同款）
+float rgbToLuma(vec3 linearRgb) {
+    return dot(linearRgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
 #endif

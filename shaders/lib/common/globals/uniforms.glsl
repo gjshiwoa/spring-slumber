@@ -11,13 +11,15 @@ uniform sampler2D colortex0; // 场景主颜色缓冲，deferred_init 初始化�
 uniform sampler2D colortex1; // bloom：composite8~12 期间为 tile 图集，composite13 起为上采样合并后的全分辨率 bloom
 uniform sampler2D colortex4; // gbuffer: rg = 打包 albedo（4x8→2x16），ba = 打包高光贴图 RGBA
 uniform sampler2D colortex5; // gbuffer: rg = 八面体观察空间法线，ba = 原始 lmcoord；光照接入后读取
+uniform sampler2D colortex7; // 杂项数据缓冲（clear = false）：右上角 1 texel = 自适应曝光（composite13 写、composite14 读），其余槽位预留
 
 uniform sampler2D depthtex0; // 深度缓冲；deferred 时刻仅含不透明几何深度（半透明尚未绘制），光照接入后使用
 
 uniform vec4 entityColor; // 实体着色（受伤红闪等），rgb 为目标色，a 为混合权重；仅 gbuffers_opaque_entities 使用
 
-uniform float viewWidth;  // 视口宽度（像素）；lib/post/bloom.glsl 计算 colortex0 源纹素尺寸
+uniform float viewWidth;  // 视口宽度（像素）；lib/post/bloom.glsl 计算 colortex0 源纹素尺寸、exposure.glsl 定位 colortex7 角点
 uniform float viewHeight; // 视口高度（像素）；同上
+uniform float frameTime;  // 帧间隔（秒）；自动曝光时间适应
 
 // 以下为天空 / 光照效果库（lib/atmosphere/sky.glsl、lib/lighting/lighting.glsl）所需，效果暂不接入
 uniform mat4 gbufferModelViewInverse; // 视图空间 -> 世界空间
