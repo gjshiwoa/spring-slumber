@@ -1,10 +1,10 @@
-// 天空纹理: gbuffers_skytextured
+// 天空纹理: gbuffers_sky_tex（备选，当前未链接，skytextured 入口现指向 gbuffers_empty）
 // 太阳 / 月亮贴图，骨架阶段原色直通（不做发光补偿）
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
-#include "/lib/constants.glsl"
-#include "/lib/common.glsl"
-#include "/lib/uniforms.glsl"
+#include "/lib/common/globals/constants.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/globals/uniforms.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;

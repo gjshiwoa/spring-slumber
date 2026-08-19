@@ -1,3 +1,3 @@
 #version 330 compatibility
 #define STAGE_VERTEX
-#include "/program/gbuffers_color.glsl"
+#include "/program/composite_tonemap.glsl"

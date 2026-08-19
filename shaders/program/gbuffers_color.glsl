@@ -1,12 +1,12 @@
-// 纯色几何类: gbuffers_basic
-// 非光照几何（选框 / 闪电等）在 deferred 之前绘制，与 gbuffers_textured 同理：
-// 关闭引擎混合，着色器内手动合成打包进 colortex4.rg
+// 手动合成（纯色）: gbuffers_color
+// 非光照纯色几何（选框等，basic 入口复用）在 deferred 之前绘制，
+// 与 gbuffers_color_textured 同理：关闭引擎混合，着色器内手动合成打包进 colortex4.rg
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
-#include "/lib/constants.glsl"
-#include "/lib/common.glsl"
-#include "/lib/uniforms.glsl"
-#include "/lib/packing.glsl"
+#include "/lib/common/globals/constants.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/utils/packing.glsl"
 
 VARYING vec4 vColor;
 

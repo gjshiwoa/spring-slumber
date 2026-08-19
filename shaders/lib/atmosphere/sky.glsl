@@ -1,7 +1,7 @@
 // 天空颜色（线性空间）
 // skybasic 前向调用；天空色也供后续雾 / 环境光扩展复用
-// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/uniforms.glsl、
-// lib/constants.glsl（TAU、天空颜色常量）
+// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/common/globals/uniforms.glsl、
+// lib/common/globals/constants.glsl（TAU、天空颜色常量）
 #ifndef LIB_SKY_GLSL
 #define LIB_SKY_GLSL
 

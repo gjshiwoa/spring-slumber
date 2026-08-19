@@ -1,16 +1,15 @@
-// 地形类 gbuffer: gbuffers_terrain
-// 不透明阶段，MRT 写两张（colortex0/1 不写，颜色由 deferred 解包 colortex4 后写出）：
+// 不透明 gbuffer: gbuffers_opaque
+// 不透明阶段，MRT 写两张（colortex0/1 不写，颜色由 deferred_init 解包 colortex4 后写出）：
 //   colortex4 = rg 打包 albedo（tex × 顶点色，4x8→2x16），ba 打包高光贴图 RGBA（4x8→2x16）
 //   colortex5 = rg 八面体观察空间法线（贴图法线经导数 TBN 变换，无 normals 纹理时为几何法线），ba 原始 lmcoord（读取端再重映射）
-// 骨架阶段不做光照与颜色空间转换；block / hand 入口复用本程序
+// albedo 存原始 sRGB（8bit 打包），反 gamma 由 deferred_init 侧统一处理；block / hand 入口复用本程序
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
-#include "/lib/constants.glsl"
-#include "/lib/common.glsl"
-#include "/lib/uniforms.glsl"
-#include "/lib/encoding.glsl"
-#include "/lib/packing.glsl"
-#include "/lib/tbn.glsl"
+#include "/lib/common/globals/constants.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/utils/space.glsl"
+#include "/lib/common/utils/packing.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;

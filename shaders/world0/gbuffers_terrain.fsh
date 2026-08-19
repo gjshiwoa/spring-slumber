@@ -1,3 +1,3 @@
 #version 330 compatibility
 #define STAGE_FRAGMENT
-#include "/program/gbuffers_terrain.glsl"
+#include "/program/gbuffers_opaque.glsl"

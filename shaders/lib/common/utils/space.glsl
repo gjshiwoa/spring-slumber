@@ -1,7 +1,7 @@
-// 导数法线 / TBN 工具（春雷 space.glsl calculateTBN / 春v2 gbuffers_terrain 内联同款）
+// 坐标空间构造工具（对应春雷 utils/space.glsl 的 TBN 部分）
 // 仅片段阶段可用（dFdx / dFdy），由 program 按需平铺引入，无外部依赖
-#ifndef LIB_TBN_GLSL
-#define LIB_TBN_GLSL
+#ifndef LIB_SPACE_GLSL
+#define LIB_SPACE_GLSL
 
 #ifdef STAGE_FRAGMENT
 
@@ -10,8 +10,8 @@ vec3 calculateGeomNormal(vec3 viewPos) {
     return normalize(cross(dFdx(viewPos), dFdy(viewPos)));
 }
 
-// cotangent frame：由观察空间位置与 UV 的屏幕导数构造 TBN
-// 贴图法线经 mat3(T, B, N) 左乘后即观察空间法线；无 UV 变化的平面自动退化
+// cotangent frame：由观察空间位置与 UV 的屏幕导数构造 TBN（春雷 / 春v2 同款）
+// 任意贴图向量经 mat3(T, B, N) 左乘后即观察空间向量；无 UV 变化的平面自动退化
 mat3 calculateTBN(vec3 viewPos, vec2 duv1, vec2 duv2) {
     vec3 n = calculateGeomNormal(viewPos);
 

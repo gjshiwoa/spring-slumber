@@ -1,15 +1,14 @@
-// 实体类 gbuffer: gbuffers_entities
-// 与 gbuffers_terrain 的区别: 叠加 entityColor（受伤红闪等实体着色）后再写入 gbuffer
-// MRT 写两张（colortex4/5，布局同 gbuffers_terrain 头部注释），colortex0/1 不写
+// 不透明 gbuffer（实体）: gbuffers_opaque_entities
+// 与 gbuffers_opaque 的区别: 叠加 entityColor（受伤红闪等实体着色）后再写入 gbuffer
+// MRT 写两张（colortex4/5，布局同 gbuffers_opaque 头部注释），colortex0/1 不写
 // 骨架阶段不做光照与颜色空间转换
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
-#include "/lib/constants.glsl"
-#include "/lib/common.glsl"
-#include "/lib/uniforms.glsl"
-#include "/lib/encoding.glsl"
-#include "/lib/packing.glsl"
-#include "/lib/tbn.glsl"
+#include "/lib/common/globals/constants.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/utils/space.glsl"
+#include "/lib/common/utils/packing.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
