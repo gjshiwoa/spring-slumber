@@ -11,7 +11,9 @@ const int R11F_G11F_B10F = 0;
 
 // ---- 通用 ----
 const float TAU            = 6.28318530718;
-const float ALPHA_CUTOUT   = 0.1;           // cutout 透贴裁剪阈值
+const float PI             = TAU * 0.5;
+const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
+const float ALPHA_CUTOUT   = 0.5;           // cutout 透贴裁剪阈值
 const float ambientOcclusionLevel = 0.0;    // 引擎指令：关闭原版 AO（光照由光影接管，不叠原版顶点暗角）
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
 const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上限 = MIN + SPAN = 31/32）
@@ -23,16 +25,56 @@ const int  colortex3Format = RGBA16F; // TAA 历史缓冲：rgb = 上帧混合�
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
-const int colortex7Format = RGBA16F; // 杂项数据：曝光槽位 1 texel（bloom 图集包围盒内 tile3/tile4 间隔，exposure.glsl 的 exposureTexel）= 自适应曝光，其余区域预留给天空盒纹理等
-const bool colortex7Clear = false;   // 曝光值跨帧存活；colortex7 写入者须透传其光栅化区域内非槽位像素（composite12 = 图集包围盒整写，见 lib/post/exposure.glsl）
+const int colortex7Format = RGBA16F; // 杂项数据（左下角杂项簇，布局见 SKYBOX_LUT_SIZE / SKYVIEW_LUT_* 常量）：预留天空盒 256×256 + 天空 view LUT 200×200（太阳半区 200×100 + 月亮半区 200×100）+ 曝光槽位 1 texel（exposure.glsl 的 exposureTexel）= 自适应曝光
+const bool colortex7Clear = false;   // 曝光值跨帧存活；colortex7 写入者须透传其光栅化区域内非槽位像素（composite12 = 图集包围盒 ∪ 天空 LUT 区域的包围矩形整写，见 lib/post/exposure.glsl）
 
-// ---- 天空颜色（lib/atmosphere/sky.glsl，暂未接入）----
-const vec3 DAY_ZENITH    = vec3(0.080, 0.220, 0.620);
-const vec3 DAY_HORIZON   = vec3(0.460, 0.580, 0.780);
-const vec3 NIGHT_ZENITH  = vec3(0.0012, 0.0026, 0.0070);
-const vec3 NIGHT_HORIZON = vec3(0.007, 0.011, 0.022);
-const vec3 DUSK_HORIZON  = vec3(0.850, 0.280, 0.070);
+// ---- 天空 / 大气（lib/atmosphere/atmosphere.glsl + sky.glsl）----
 const float SKY_TEXTURE_BRIGHTNESS = 4.0; // 太阳 / 月亮贴图发光补偿（日月贴图程序 gbuffers_sky_tex，暂未链接）
+
+// colortex7 左下角杂项簇布局（texel 域，锚定 texel (0,0) 角 = 屏幕左下）：预留天空盒占最角上、
+// 天空 view LUT 200×200 水平相邻、曝光槽位在二者 4 texel 间隔 gutter 内（exposure.glsl）；
+// 固定 texel 布局假设缓冲 ≥ ~480×260（实际渲染分辨率下限远高于此）
+const int SKYBOX_LUT_SIZE      = 256; // 预留：天空盒槽位边长（八面体世界方向 → 天空色，扩展点；春雷 begin19 skybox_lut 同尺寸）
+const int SKYVIEW_LUT_W        = 200; // 天空 view LUT 半区宽 = 视线-光源方位角参数化分辨率（春雷 skyViewLutSize 同值）
+const int SKYVIEW_LUT_H        = 100; // 天空 view LUT 半区高 = 天顶角参数化分辨率；太阳（上半区）/ 月亮（下半区）纵向堆叠 = 200×200
+const int SKYVIEW_LUT_ORIGIN_X = SKYBOX_LUT_SIZE + 4; // LUT 区域原点 x（texel）= 260：预留天空盒右侧 4 texel 间隔，区域锚定缓冲底边
+
+// Chapman 解析单次散射（移植自 Shadertoy WcdSW4，MIT，John Payne 2024，https://www.shadertoy.com/view/WcdSW4 ）
+// 密度模型为 r² 高斯 exp(-(r²-R²)/H²)，H 是大数值参数化、不是物理尺度高度——
+// 有效尺度高度 = H²/(2R) ≈ Rayleigh 8.05km / Mie 1.54km / 臭氧 16.3km，即地球真实量级
+const float EARTH_RADIUS = 6360e3;    // 行星半径（米）
+const float SKY_NO_HIT   = 1e30;      // 视线未命中行星的哨兵距离（替代 inf：编译期 1/0 在部分驱动上未定义）
+const float RAYLEIGH_SCALE_HEIGHT = 320000.0;                                 // Rayleigh 参数 H（有效 8.05km）
+const vec3  RAYLEIGH_SCATTERING_COEFFICIENTS = vec3(6.384e-6, 12.00e-6, 28.74e-6); // 散射 = 消光（瑞利无吸收）
+const float MIE_SCALE_HEIGHT = 140000.0;                                      // Mie 参数 H（有效 1.54km）
+const vec3  MIE_SCATTERING_COEFFICIENTS = vec3(1.252e-6, 1.689e-6, 2.530e-6);
+const vec3  MIE_EXTINCTION_COEFFICIENTS = MIE_SCATTERING_COEFFICIENTS * 1.11; // 消光 = 散射 × 1.11（气溶胶吸收 ~10%）
+const float OZONE_SCALE_HEIGHT = 455000.0;                                    // 臭氧参数 H（有效 16.3km），纯吸收、日落修色
+// 臭氧系数按 Chappius 吸收带真实截面定形：680/550/440nm 截面 = 1.368/3.314/0.136 ×10⁻²⁵ m²（293K，绿重于红、峰值 ~575nm），
+// 光谱数据 https://www.iup.physik.uni-bremen.de/gruppen/molspec/databases/referencespectra/o3spectra2011/index.html ；
+// 截面值与 6ppm 浓度取法参考 Shadertoy『Scattering with Ozone』（reinsteam 2017，CC BY-NC-SA，
+// https://www.shadertoy.com/user/reinsteam ，其层状臭氧等效垂直 τ = 0.018/0.044/0.002）。
+// WcdSW4 原系数 (2.824, 1.683, 0)e-6 光谱形状相反（R>G）：地平线长路径上红衰减快于绿，日出天空整体发黄
+// （数值验证：太阳 +2° 朝太阳地平线线性 R/G 1.74 → 3.86，即黄 → 橙）；本组锚定垂直 τ550 ≈ 0.04
+// （真实大气 ~0.03 + 适量风格化对齐参考版 0.044；白天天空色数值验证基本不变）
+const vec3  OZONE_EXTINCTION_COEFFICIENTS = vec3(1.021e-6, 2.474e-6, 1.015e-7);
+const vec3  SOLAR_IRRADIANCE = vec3(236.8, 206.4, 204.9);                     // 大气顶太阳辐照度（相对单位）
+const vec3  MOON_IRRADIANCE  = SOLAR_IRRADIANCE * 5.0e-4; // 大气顶月亮辐照度（春雷同值 2.5e-6×2e2：真实满月 ~1/40万，游戏取 ~1/2000 保夜景可见；天空 LUT 月亮半区光源）
+const float SKY_BRIGHTNESS   = 1.0;  // 天空色整体缩放：对齐 albedo 0~1 的画面量级（进游戏后校准）
+const float SKY_LIGHT_MIN_HEIGHT = -0.2; // LUT 光源低于地平线约 8.6° 后散射已不可见，整半区写 0 跳过 Chapman 求值
+const float SKYVIEW_LUT_VALID_MARKER = 0.625; // LUT alpha 有效标记（RGBA16F 精确值），区别于清零 / 旧版 alpha=1 / 未初始化内容
+// float32 数值防护（夜晚 / 下视溢出的根源是 erfcx 负参量分支 exp(b²)、b 可达 r/H ~ 45 → b² ~ 2000 溢出 Inf）
+const float SKY_ERFCX_EXP_MAX = 80.0; // erfcx 负支 exp 上限：2·e^80 ≈ 1.1e35 有限，对应光学深度早已全遮蔽、钳顶无损
+const float SKY_AIRMASS_MAX   = 1e15; // airMass 钳制上限：τ = βmax·1e15 ≈ 2.9e10 → exp(-τ) = 0；兼杀下视掠射闭式相消的负值 / NaN 垃圾。
+// 上限刻意远高于「exp 归零」所需：太阳沉入地平线后 sun 路 airMass 饱和于本值、tauS 停止增长，
+// energyIntegralRatio 的 (e^-a - e^-b)/(b-a) 残留 ~e^-tauV/tauS 尾巴——上限偏低时夜空冻结成恒定亮度地板
+// （1e9 时 ≈ 2e-4 luma，夜间自动曝光逼近 720× 上限后放大成可见辉光；月亮半区置黑也治不了，光在太阳半区）；
+// 1e15 把地板压到 ~2e-10（曝光上限内不可见）。白天 / 曙暮光主段 airMass < 1e6 完全不触及钳制，数值不变
+// Mie 相函数 = HG(g1) 与 Draine(g2, a) 按权重 w 混合（Shadertoy 原调参，前向峰 + 适度后向）
+const float MIE_PHASE_G1 = 0.862;              // HG 主叶前向强度
+const float MIE_PHASE_G2 = 0.5069161813017329; // Draine 次叶
+const float MIE_PHASE_A  = 250.0;              // Draine 各向异性因子
+const float MIE_PHASE_W  = 0.24075857115188248; // 混合权重
 
 // ---- 信标光柱（gbuffers_beacon，春雷同值）----
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
@@ -40,8 +82,9 @@ const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写
 
 // ---- Bloom（lib/post/bloom.glsl，无阈值，整幅 HDR 直接进金字塔）----
 const float BLOOM_STRENGTH = 0.15; // 泛光合成强度（tonemap 前线性域加法）
-const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春雷同值）：每级 5×5 核覆盖 ±此值纹素；总模糊半径由上采样回卷逐级累积保证，单级无需大步长（步长 4 在高频画面上跨步混叠，反而给图集带入网格）
-const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile），getBloom 除以权重和 3.0 归一
+const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春雷同值）：最大 tap 偏移为 ±2×此值（当前 ±4 源纹素）；总模糊半径由上采样回卷逐级累积保证，单级无需大步长（步长 4 在高频画面上跨步混叠，反而给图集带入网格）
+const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile）
+const float BLOOM_WEIGHT_SUM = 3.0; // ΣBLOOM_WEIGHTS；getBloom 归一化，修改权重时同步更新
 
 // ---- Tonemap（lib/post/tonemap.glsl，AgX，春雷同值）----
 const float AGX_ADDITIVE = 0.6;       // AgX 曲线预缩放（与曝光系数各司其职：曝光在 tonemap 前整体乘）
@@ -84,16 +127,36 @@ const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 深度置信失效（解遮挡）
 const float TAA_BLEND_MIN           = 0.02; // 当前帧权重下限（历史权重上限 0.98）
 const float TAA_BLEND_HAND_MIN      = 0.1;  // 手部当前帧权重下限（防手部拖影）
 const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）
-const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与纯天空像素的哨兵值（下帧变几何时深度置信自然归零、快速收敛）
+const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与天空像素的哨兵值
+// 半精度上限：历史 a 通道深度钳制与天空像素（锚点 depth >= 1）的哨兵值——天空 ↔ 天空 |Δ|=0 满置信、天空 ↔ 几何相对差巨大自然归零（置信公式免分支，快速收敛）
 const float TAA_DEPTH_CONF_EDGE0    = 0.02; // 深度置信 smoothstep 下沿（重投影深度 vs 历史 a 通道的相对差）
 const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 
-// ---- 光照（lib/lighting/lighting.glsl，暂未接入）----
-const vec3 SUNLIGHT_COLOR    = vec3(1.00, 0.95, 0.86) * 1.40;
-const vec3 MOONLIGHT_COLOR   = vec3(0.10, 0.14, 0.24) * 0.60;
-const vec3 DAY_SKY_AMBIENT   = vec3(0.180, 0.260, 0.440);
-const vec3 NIGHT_SKY_AMBIENT = vec3(0.008, 0.011, 0.020);
-const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20);
-const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底，避免纯黑不可见
+// ---- 光照（lib/lighting/lighting.glsl，已接入 deferred_init；直接光物理化，春雷 shading.glsl 同构）----
+// 直射 = albedo/π × mix(MOON_IRRADIANCE, SOLAR_IRRADIANCE, day) × solarTransmittance(表面点 -> 光源) × NdotL × 阴影可见性；
+// 大气顶辐照度直接复用大气常量（与天空 LUT 同源——sky:direct 亮度比物理一致，绝对量级随 SKY_BRIGHTNESS 与天空一起统调）；
+// 环境光 / 方块光同为辐照度形式，与直射共用同一个 albedo/π
+const vec3 DAY_SKY_AMBIENT   = vec3(6.0, 8.0, 14.0);        // 白天天空环境辐照度 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；单次散射模型无多次散射加成），进游戏统调
+const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4;    // 夜晚 = 月亮辐照度比（与 MOON_IRRADIANCE 同源，春雷 1/2000）；夜晚过暗只抬 MOON_IRRADIANCE 单旋钮
+const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20) * PI; // 方块光辐照度（π × 旧 albedo 直乘时代的量级，行为不变）
+const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底（gameplay 地板，刻意低于物理夜天光），避免纯黑不可见
+
+// ---- 阴影（program/shadow.glsl 写入端 + lib/lighting/shadow.glsl 采样端）----
+// 引擎指令前五条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0）由 OptiFine/Iris 扫描
+const int   shadowMapResolution      = 2048;   // 阴影贴图边长（texel）；128m 距离下每米 8 texel，中心区经扭曲再放大约 6.7 倍
+const float shadowDistance           = 128.0;  // 阴影覆盖半径（米）；采样端超出即回退 skyLight 门控（lib/lighting/lighting.glsl）
+const float shadowDistanceRenderMul  = 1.0;    // 超出 shadowDistance 的几何不进阴影渲染（省填充率，淡出兜底视觉）
+const float sunPathRotation          = -30.0;  // 太阳轨迹倾角（度，春雷同值）：正午太阳不过天顶、影子不退化；天空与光照方向自动一致
+const bool  shadowHardwareFiltering0 = true;   // 仅 shadowtex0 开硬件深度比较（声明为 sampler2DShadow）；
+                                              // shadowtex1 不开、保持 sampler2D 裸深度（仅不透明几何）——彩色阴影遮挡分离与
+                                              // 未来 PCSS blocker search 共用的后路（春v2 同布置，引擎配置零改动可升级）
+const float SHADOW_DISTORT_FACTOR = 0.85;  // 线性扭曲强度（春v2/BSL/Kappa 同族）：中心 factor = 1-此值 = 0.15、纹素密度放大约 6.7 倍，边缘 factor = 1 不缩放
+const float SHADOW_DEPTH_SCALE    = 0.2;   // shadow clip z 压缩（BSL/Photon/Kappa 同值）：写读两侧对称，配合常数 bias 抑制痤疮
+const int   SHADOW_PCF_SAMPLES    = 4;     // 黄金螺旋 tap 数（硬件比较自带 2×2 双线性，等效 32 次深度比较；IGN 时域旋转 + TAA 累积收敛）
+const float SHADOW_RADIUS_BASE    = 0.25;   // 基础软半径（texel）
+const float SHADOW_RADIUS_DIST    = 2.0;   // 随相机距离增长的半径上限（texel）
+const float SHADOW_BIAS_NORMAL    = 0.05;  // normal offset 基数（世界单位，随距离 / 坡度放大，春v2 同思路）
+const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（进游戏按痤疮 / 悬空影微调）
+const float SHADOW_FADE_BEGIN     = 0.8;   // 距离淡出起点（× shadowDistance），终点 = shadowDistance
 
 #endif

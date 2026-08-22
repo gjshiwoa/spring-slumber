@@ -28,7 +28,7 @@ void main() {
         vec4 rect = bloomTileRect(k);
         if (all(greaterThanEqual(vTexCoord, rect.xy)) && all(lessThanEqual(vTexCoord, rect.xy + rect.zw))) {
             if (k < BLOOM_LEVEL) {
-                outColor = texture(colortex1, vTexCoord);
+                outColor = texelFetch(colortex1, ivec2(gl_FragCoord.xy), 0);
             } else {
                 vec2 tileLocal = (vTexCoord - rect.xy) / rect.zw;
                 outColor = vec4(bloomDownsampleTile(BLOOM_LEVEL, tileLocal), 1.0);

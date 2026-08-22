@@ -1,51 +1,194 @@
-// 天空颜色（线性空间）
-// skybasic 前向调用；天空色也供后续雾 / 环境光扩展复用
-// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/common/globals/uniforms.glsl、
-// lib/common/globals/constants.glsl（TAU、天空颜色常量）
+// 天空颜色（线性 HDR）—— Chapman 解析大气的管线封装
+// deferred_init 天空像素（depth >= 1）调用；同一物理核心（atmosphere.glsl）供后续
+// 雾 / 直射光着色（solarTransmittance）/ 环境光 / 水面反射扩展复用
+// 当前范围：太阳 + 月亮双光源、晴天（MC 日月恰好相对——白天月亮沉入地平线后其半区在低于阈值时整区写 0、
+// 夜晚反之，曙暮光时段两者并存；月亮辐照度 = 太阳 × 1/2000 春雷同值；星星 / 雨天为扩展点）
+//
+// sky-view LUT（deferred_init 天空分支不再逐像素求值 Chapman 解析式，只做一次双线性采样；
+// 参数化移植自春雷 lib/atmosphere/scattering.glsl 的 Hillaire 非线性 sky-view LUT，
+// Sébastien Hillaire, EGSR 2020；春雷载体为 Iris 专用 image + begin pass，本项目按
+// colortex7 槽位协议寄生存储、生成挂在 composite_bloom_upsample / composite12）：
+//   LUT 每 frame 在 colortex7 左下角 200×200 区域重算（太阳半区 + 月亮半区各 200×100 ≈ 2%
+//   屏幕成本，相机海拔 / 光源角度逐帧跟进），替代全分辨率逐像素解析求值
+// 参数化（球对称大气 + 单光源下天空色由 (视线天顶余弦 vzc, 视线-光源水平投影夹角余弦 lvCos)
+// 完全决定——mu = vzc·szCos + vzSin·szSin·lvCos，该 2D 参数化是精确表示、无近似损失；
+// 每个光源独占一个半区）：
+//   a ∈ [0,1] 方位角：a = sqrt((1 - lvCos) / 2)，sqrt 使纹素向太阳侧（a = 0）集中——
+//     Mie 前向峰与近日地平线的亮度梯度最陡；分辨率 = SKYVIEW_LUT_W = 200
+//   v ∈ [0,1] 天顶角：0 = 天顶、0.5 = 地平线、1 = 天底，上 / 下半段各一段 sqrt 非线性
+//     使纹素向地平线集中——曙暮光带 / 地平线色变的梯度最陡；分辨率 = SKYVIEW_LUT_H = 100
+//   参数域 [0,1] 线性映射到首末纹素中心（半纹素内缩）：双线性采样不越区域边界，
+//     与相邻槽位（预留天空盒 / 月亮半区）不串色
+// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：
+//   lib/common/globals/uniforms.glsl（cameraPosition / sunPosition / moonPosition / colortex7）、
+//   lib/common/globals/constants.glsl（TAU、大气常量、SKYVIEW_*）、lib/common/utils/space.glsl（viewToWorldDirection）、
+//   lib/atmosphere/atmosphere.glsl（物理核心，仅解析路径与 LUT 生成端使用）
+// 光源方向与时间因子：sunDirectionWorld / moonDirectionWorld 保留（composite12 的 LUT 生成端
+// 顶点阶段调用，并在同处预计算地平线几何与光源光学深度）；时间因子已并入通用全屏 vsh
+//（program/fullscreen_vsh.glsl，main 内直接计算）——采样端 getSkyColor 的光源方向与
+// 观察者地平线几何改为显式参数接收（由调用方从 vsh 帧数据 varying 传入）
 #ifndef LIB_SKY_GLSL
 #define LIB_SKY_GLSL
 
-// 太阳在世界系中的高度 [-1,1]
-float sunHeight() {
-    return sin(sunAngle * TAU);
+// 太阳方向（世界系 = 玩家对齐系，+Y 朝上）
+vec3 sunDirectionWorld() {
+    return normalize(viewToWorldDirection(sunPosition));
 }
 
-// 白天权重，黄昏在 -0.10 ~ 0.25 之间过渡
-float dayNightFactor() {
-    return smoothstep(-0.10, 0.25, sunHeight());
+// 月亮方向（世界系；与太阳恰好相对——白天沉入地平线后，月亮半区按阈值写 0）
+vec3 moonDirectionWorld() {
+    return normalize(viewToWorldDirection(moonPosition));
 }
 
-// 黄昏权重，太阳贴近地平线时最大
-float duskFactor() {
-    return 1.0 - smoothstep(0.0, 0.35, abs(sunHeight()));
+// ---------- sky-view LUT 槽位几何（colortex7 左下角杂项簇） ----------
+
+// LUT 全区域矩形（缓冲归一化坐标，xy = 原点、zw = 边长）：锚定缓冲底边（texel y ∈ [0, 200)）、
+// 预留天空盒右侧（SKYVIEW_LUT_ORIGIN_X）；composite12 的 vsh 光栅包围盒扩展与采样端共用
+vec4 skyViewLutRegionRect() {
+    vec2 texel = 1.0 / vec2(textureSize(colortex7, 0));
+    vec2 origin = vec2(float(SKYVIEW_LUT_ORIGIN_X), 0.0) * texel;
+    vec2 size = vec2(float(SKYVIEW_LUT_W), float(2 * SKYVIEW_LUT_H)) * texel;
+    return vec4(origin, size);
 }
 
-// 天空渐变色，dirView 为视图空间方向（不要求归一化）
-vec3 getSkyColor(vec3 dirView) {
-    vec3 dirWorld = normalize(mat3(gbufferModelViewInverse) * dirView);
-    vec3 sunDirWorld = normalize(mat3(gbufferModelViewInverse) * normalize(sunPosition));
+// 太阳半区矩形（区域上半 = uv y ∈ [100/H, 200/H] = 缓冲底边上方 100~200 texel 行，
+// 即 fsh 判定 pixel.y ∈ [100, 200) 的那一段）
+vec4 skyViewLutSunRect() {
+    vec4 region = skyViewLutRegionRect();
+    return vec4(region.xy + vec2(0.0, region.w * 0.5), vec2(region.z, region.w * 0.5));
+}
 
-    float day = dayNightFactor();
+// 月亮半区矩形（区域下半 = uv y ∈ [0, 100/H]，最贴缓冲底边，即 fsh 判定 pixel.y ∈ [0, 100) 的那一段）
+vec4 skyViewLutMoonRect() {
+    vec4 region = skyViewLutRegionRect();
+    return vec4(region.xy, vec2(region.z, region.w * 0.5));
+}
 
-    vec3 zenith  = mix(NIGHT_ZENITH, DAY_ZENITH, day);
-    vec3 horizon = mix(NIGHT_HORIZON, DAY_HORIZON, day);
+// 参数域 [0,1] → 纹素中心域（首末纹素中心对齐的半纹素内缩，春雷 utils/math.glsl 同式）
+float lutParamToTexelCenter(float p, float resolution) {
+    return p * (resolution - 1.0) / resolution + 0.5 / resolution;
+}
 
-    // 黄昏时地平线一侧的暖色，朝太阳方向更浓
-    float horizonWeight = pow(1.0 - clamp(dirWorld.y, 0.0, 1.0), 3.0);
-    float sunFacing = pow(max(dot(dirWorld, sunDirWorld), 0.0), 3.0);
-    horizon = mix(horizon, DUSK_HORIZON, duskFactor() * horizonWeight * (0.35 + 0.65 * sunFacing));
+// ---------- 采样端 ----------
 
-    float gradient = pow(clamp(dirWorld.y, 0.0, 1.0), 0.55);
-    vec3 sky = mix(horizon, zenith, gradient);
+// 世界系方向（归一化）→ LUT 参数 (a, v)，与生成端 skyViewLutTexel 严格互逆
+// horizon 为观察者地平线几何 (cosBeta, beta, zenithHorizon)——通用全屏 vsh 的 vHorizon
+// 一次算好、调用方传入（原逐像素 sqrt + acos 上移 vsh）
+vec2 skyViewLutParams(vec3 dirWorld, vec3 sunWorld, vec3 horizon) {
+    float cosBeta = horizon.x;
+    float beta = horizon.y;
+    float zenithHorizon = horizon.z;
 
-    // 地平线以下向暗部过渡（虚空方向）
-    sky = mix(sky, sky * 0.35, clamp(-dirWorld.y * 3.0, 0.0, 1.0));
+    float vzc = clamp(dirWorld.y, -1.0, 1.0);
+    float vzSin = sqrt(max(1.0 - vzc * vzc, 0.0));
+    float szCos = clamp(sunWorld.y, -1.0, 1.0);
+    float szSin = sqrt(max(1.0 - szCos * szCos, 0.0));
 
-    // 雨天：压暗并去饱和
-    float gray = dot(sky, vec3(0.3333));
-    sky = mix(sky, vec3(gray) * vec3(0.75, 0.80, 0.88), rainStrength * 0.9);
+    // 视线 / 太阳水平投影的夹角余弦；vzSin / szSin → 0 时方位退化（天顶色与方位无关，取 +X 基准无害）
+    vec2 viewHoriz = vzSin > 1e-4 ? dirWorld.xz / vzSin : vec2(1.0, 0.0);
+    vec2 sunHoriz = szSin > 1e-4 ? sunWorld.xz / szSin : vec2(1.0, 0.0);
+    float lvCos = clamp(dot(viewHoriz, sunHoriz), -1.0, 1.0);
 
-    return sky;
+    // 天顶角：上 / 下半段各一段 sqrt 非线性（春雷 NONLINEARSKYVIEWLUT 同式）
+    float zenithParam;
+    float vzcAngle = acos(vzc);
+    if (vzc >= -cosBeta) {
+        float t = 1.0 - vzcAngle / zenithHorizon;
+        zenithParam = (1.0 - sqrt(clamp(t, 0.0, 1.0))) * 0.5;
+    } else {
+        float t = (vzcAngle - zenithHorizon) / beta;
+        zenithParam = sqrt(clamp(t, 0.0, 1.0)) * 0.5 + 0.5;
+    }
+
+    return vec2(sqrt(clamp((1.0 - lvCos) * 0.5, 0.0, 1.0)), zenithParam);
+}
+
+// 半区采样：参数 → 半纹素内缩局部 uv → 缓冲 uv 双线性（太阳 / 月亮半区共用）。
+// alpha 写 SKYVIEW_LUT_VALID_MARKER；保留完整 vec4 供首帧 / 缓冲重建校验。
+vec4 sampleSkyViewLutHalf(vec4 rect, vec2 param) {
+    vec2 localUv = vec2(lutParamToTexelCenter(param.x, float(SKYVIEW_LUT_W)),
+                        lutParamToTexelCenter(param.y, float(SKYVIEW_LUT_H)));
+    return texture(colortex7, rect.xy + localUv * rect.zw);
+}
+
+// LUT 尚未生成或缓冲重建时的轻量天空：只在首帧 / 无效槽位使用，不替代正常 Chapman 天空。
+vec3 fallbackSkyColor(vec3 dirWorld, vec3 sunDirWorld) {
+    float day = smoothstep(-0.10, 0.25, sunDirWorld.y);
+    vec3 ambientRadiance = mix(NIGHT_SKY_AMBIENT, DAY_SKY_AMBIENT, day) / PI;
+    float hemisphere = mix(0.18, 1.0, smoothstep(-0.15, 0.55, dirWorld.y));
+    return ambientRadiance * (0.45 * SKY_BRIGHTNESS * hemisphere);
+}
+
+// 天空色采样入口（deferred_init 天空分支 / 未来雾、反射经此走 LUT）
+// dirView 为视图空间方向（不要求归一化）；sunDirWorld / moonDirWorld 为世界系光源方向、
+// horizon 为观察者地平线几何——均由调用方从通用全屏 vsh 的帧数据 varying 传入（免逐像素
+// 方向求值与地平线 sqrt + acos）；返回线性 HDR，SKY_BRIGHTNESS 已在生成端乘入
+// 太阳 + 月亮两半区和式（春雷同构）：白天月亮沉于地平线下其半区写 0、夜晚反之，
+// 曙暮光时段两者并存；LUT 内容滞后一帧（composite12 在 deferred 之后执行）。alpha 有效位、
+// NaN / Inf 范围与 frameCounter 共同拦截首帧或缓冲重建垃圾，回退轻量天空而非黑屏。
+vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon) {
+    vec3 dirWorld = normalize(viewToWorldDirection(dirView));
+    vec4 sunLut = sampleSkyViewLutHalf(skyViewLutSunRect(),
+                                       skyViewLutParams(dirWorld, sunDirWorld, horizon));
+    vec4 moonLut = sampleSkyViewLutHalf(skyViewLutMoonRect(),
+                                        skyViewLutParams(dirWorld, moonDirWorld, horizon));
+
+    bool finiteRgb = all(equal(sunLut.rgb, sunLut.rgb)) && all(equal(moonLut.rgb, moonLut.rgb))
+                  && all(lessThan(abs(sunLut.rgb), vec3(65000.0)))
+                  && all(lessThan(abs(moonLut.rgb), vec3(65000.0)));
+    bool markerValid = abs(sunLut.a - SKYVIEW_LUT_VALID_MARKER) < 1e-3
+                    && abs(moonLut.a - SKYVIEW_LUT_VALID_MARKER) < 1e-3;
+    bool valid = frameCounter > 0 && markerValid && finiteRgb;
+    return valid ? sunLut.rgb + moonLut.rgb : fallbackSkyColor(dirWorld, sunDirWorld);
+}
+
+// ---------- 生成端（composite_bloom_upsample / composite12） ----------
+
+// 解析天色（世界系方向直接求值 Chapman）：LUT 生成核心，也是解析路径的完整保留——
+// 下视未命中行星（掠射 / 平视）与上视一样走天空射线，命中则散射积分止于地面；
+// 光源通用（太阳 / 月亮经 irradiance 区分强度）。observerRadius 与 lightOpticalDepth
+// 由 composite12 vsh 每帧预计算，避免每个 LUT texel 重复相机半径与三介质光源路径 Chapman。
+vec3 skyRadianceAnalytic(float observerRadius, vec3 dirWorld, vec3 lightWorld,
+                         vec3 lightOpticalDepth, vec3 irradiance) {
+    vec3 origin = vec3(0.0, observerRadius, 0.0);
+    float t = planetHitDistance(observerRadius, dirWorld.y);
+    return atmosphericRadiance(origin, dirWorld, lightWorld, lightOpticalDepth, t, irradiance)
+         * SKY_BRIGHTNESS;
+}
+
+// 半区 texel → 天色：local.x ∈ [0, SKYVIEW_LUT_W)（a = 0 在光源侧）、
+// local.y ∈ [0, SKYVIEW_LUT_H)（j = 0 为天顶行——半区靠缓冲底边的行，与采样端 y 映射互逆）
+// 在「光源水平投影 = +X、光源位于 XY 平面内」的局部系构造几何：球对称大气的散射只依赖
+// (vzc, szCos, mu)，该局部系与真实方位的差仅为绕天顶旋转，结果等价；lightWorld.y 即光源天顶余弦
+vec3 skyViewLutTexel(ivec2 local, float observerRadius, vec3 horizon,
+                         vec3 lightWorld, vec3 lightOpticalDepth, vec3 irradiance) {
+    float beta = horizon.y;
+    float zenithHorizon = horizon.z;
+
+    // 纹素中心参数（skyViewLutParams 的逆映射）
+    float azimuthParam = float(local.x) / float(SKYVIEW_LUT_W - 1);
+    float zenithParam = float(local.y) / float(SKYVIEW_LUT_H - 1);
+
+    float vzc;
+    if (zenithParam < 0.5) {
+        float q = 1.0 - 2.0 * zenithParam;
+        vzc = cos(zenithHorizon * (1.0 - q * q));
+    } else {
+        float q = 2.0 * zenithParam - 1.0;
+        vzc = cos(zenithHorizon + beta * (q * q));
+    }
+    float vzSin = sqrt(max(1.0 - vzc * vzc, 0.0));
+
+    float lvCos = 1.0 - 2.0 * azimuthParam * azimuthParam;
+    float lvSin = sqrt(max(1.0 - lvCos * lvCos, 0.0));
+
+    float szCos = clamp(lightWorld.y, -1.0, 1.0);
+    float szSin = sqrt(max(1.0 - szCos * szCos, 0.0));
+
+    vec3 localLight = vec3(szSin, szCos, 0.0);
+    return skyRadianceAnalytic(observerRadius,
+                               vec3(vzSin * lvCos, vzc, vzSin * lvSin),
+                               localLight, lightOpticalDepth, irradiance);
 }
 
 #endif

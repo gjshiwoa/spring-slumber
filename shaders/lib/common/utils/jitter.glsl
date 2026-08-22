@@ -1,5 +1,6 @@
 // TAA 亚像素抖动注入（对应春雷 lib/common/utils/stochastic.glsl 的 jitter 部分），由 gbuffer 类
-// program 的 vsh 与 composite_taa 的 vsh 按需平铺引入；依赖先行 include constants.glsl（TAA_JITTER_SAMPLES /
+// program 的 vsh 与通用全屏 vsh（program/fullscreen_vsh.glsl，其 vJitter 即
+// taaJitterUV 的 vsh 侧一次算好）按需平铺引入；依赖先行 include constants.glsl（TAA_JITTER_SAMPLES /
 // TAA_JITTER_SCALE）与 uniforms.glsl（frameCounter / viewWidth / viewHeight），lib 之间不互相 include 的约定不变
 #ifndef LIB_JITTER_GLSL
 #define LIB_JITTER_GLSL

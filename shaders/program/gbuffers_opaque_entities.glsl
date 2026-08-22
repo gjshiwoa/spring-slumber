@@ -26,16 +26,25 @@ layout(location = 1) out vec4 outDetail;  // colortex5
 
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
+
+    // 导数计算必须先于 discard（quad 内被提前终止的透明 texel 会使幸存像素的 dFdx/dFdy
+    // 拿到未定义值，cutout 边缘法线错乱——同 gbuffers_opaque 的顺序约束）；
+    // 先集中求好再过 discard，TBN 构造与 normals 采样推迟到后面
+    vec3 dp1 = dFdx(vViewPos);
+    vec3 dp2 = dFdy(vViewPos);
+    vec2 duv1 = dFdx(vTexCoord);
+    vec2 duv2 = dFdy(vTexCoord);
+
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
     color.rgb = mix(color.rgb, entityColor.rgb, entityColor.a);
 
-    // 高光贴图 RGBA 全量打包（labPBR: r smoothness / g F0 / b porosity·SSS / a emissive）
-    vec4 specularMap = texture(specular, vTexCoord);
-
     // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
     // 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)，变换后即导数几何法线
-    mat3 tbn = calculateTBN(vViewPos, dFdx(vTexCoord), dFdy(vTexCoord));
+    mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
     vec3 viewNormal = normalize(tbn * (texture(normals, vTexCoord).rgb * 2.0 - 1.0));
+
+    // 高光贴图 RGBA 全量打包（labPBR: r smoothness / g F0 / b porosity·SSS / a emissive）
+    vec4 specularMap = texture(specular, vTexCoord);
 
     outMaterial = vec4(pack4x8To2x16(color), pack4x8To2x16(specularMap));
     outDetail = vec4(encodeOctahedral(viewNormal), vLmcoord); // lmcoord 存原始值

@@ -8,18 +8,16 @@
 #ifndef LIB_EXPOSURE_GLSL
 #define LIB_EXPOSURE_GLSL
 
-// colortex7 曝光槽位（杂项缓冲的第一个槽）：bloom 图集包围盒内、tile3 与 tile4 之间的
-// 横向间隔中央——写入者 composite_bloom_upsample（composite12，上采样链末级）只光栅化
-// 图集包围盒，槽位落在包围盒内即可随链写入、无需为测光单开全屏 pass（原右上角方案要求
-// 写入者全屏光栅化，colortex7 全屏透传 ~16B/px 的成本由此消除）；间隔 texel 不属于任何
-// tile，与图集数据无耦合；坐标由 bloomTileRect 运行时推导、不假设缓冲分辨率，
-// 写入端（composite12）与读取端（composite_taa / final）共用本函数，位置恒一致
+// colortex7 曝光槽位（杂项簇的第一个槽）：预留天空盒与天空 view LUT 区域之间的 4 texel
+// 间隔 gutter 内、缓冲底边上——固定 texel 位置（SKYVIEW_LUT_ORIGIN_X - 2, 0），与两区域在
+// 任何分辨率下不相交（原方案在 bloom 图集包围盒 tile3/tile4 间隔、位置随分辨率浮动，在
+// 1366×768 / 1440×900 等常见分辨率下会落进 LUT 区域）；写入者 composite_bloom_upsample
+//（composite12，上采样链末级）的光栅区域 = 图集包围盒 ∪ 天空 LUT 区域的包围矩形，槽位必在
+// 其内随链写入、无需为测光单开全屏 pass；gutter texel 不属于任何槽位数据、天空盒 / LUT 的
+// 双线性采样有半纹素内缩不越界，与图集 / 簇内容无耦合；写入端（composite12）与读取端
+//（composite_taa / final）共用本函数，位置恒一致
 ivec2 exposureTexel() {
-    ivec2 atlasSize = textureSize(colortex1, 0);
-    vec4 t4 = bloomTileRect(BLOOM_TILE_COUNT - 1);
-    vec2 origin = t4.xy * atlasSize; // tile4 原点（texel 域，含分数部分）
-    return ivec2(origin.x + t4.z * float(atlasSize.x) * 0.5, // 列内水平居中
-                 origin.y - 2.0);                             // 间隔中央（间隔 4 texel，两侧各余 ≥1 texel）
+    return ivec2(SKYVIEW_LUT_ORIGIN_X - 2, 0);
 }
 
 // 场景平均亮度（春雷同款对数平均）：在 bloom 图集最粗 tile（tile4，1/64 分辨率低频 HDR）上

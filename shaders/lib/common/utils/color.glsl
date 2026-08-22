@@ -17,4 +17,20 @@ float rgbToLuma(vec3 linearRgb) {
     return dot(linearRgb, vec3(0.2126, 0.7152, 0.0722));
 }
 
+// RGB → YCoCg 去相关变换（Y = 亮度行 0.25/0.5/0.25，Co = R−B 色差，Cg = G−(R+B) 色度），
+// 与 yCoCgToRgb 精确互逆；亮度域统计 / 逐通道去相关钳制用（TAA 方差钳制已用，
+// 未来 denoise / SSR 方差估计等同用）；Y 分量单独取时未用的 Co/Cg 由编译器消除
+vec3 rgbToYCoCg(vec3 color) {
+    return vec3(
+        color.x * 0.25 + color.y * 0.5  + color.z * 0.25,
+        color.x * 0.5  - color.z * 0.5,
+       -color.x * 0.25 + color.y * 0.5  - color.z * 0.25
+    );
+}
+
+vec3 yCoCgToRgb(vec3 color) {
+    float yLessCg = color.x - color.z;
+    return vec3(yLessCg + color.y, color.x + color.z, yLessCg - color.y);
+}
+
 #endif

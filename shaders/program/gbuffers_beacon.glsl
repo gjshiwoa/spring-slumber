@@ -29,6 +29,13 @@ layout(location = 1) out vec4 outDetail;  // colortex5
 
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
+
+    // 位置屏幕导数先于 discard 求好（同 gbuffers_opaque 的顺序约束：quad 内被提前终止的
+    // 透明 texel 会使幸存像素的 dFdx/dFdy 拿到未定义值）；cross / normalize 推迟到核心分支，
+    // 外壳分支不做这部分工作
+    vec3 dp1 = dFdx(vViewPos);
+    vec3 dp2 = dFdy(vViewPos);
+
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
 
     vec4 previousMaterial = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);
@@ -41,8 +48,8 @@ void main() {
         outDetail = texelFetch(colortex5, ivec2(gl_FragCoord.xy), 0);
     } else {
         // 不透明核心：自发光整像素写 gbuffer
+        vec3 viewNormal = geomNormalFromDerivatives(dp1, dp2);
         vec4 specularMap = vec4(0.0, 0.0, 0.0, BEACON_CORE_EMISSIVE);
-        vec3 viewNormal = calculateGeomNormal(vViewPos);
         outMaterial = vec4(pack4x8To2x16(color), pack4x8To2x16(specularMap));
         outDetail = vec4(encodeOctahedral(viewNormal), vec2(0.0));
     }
