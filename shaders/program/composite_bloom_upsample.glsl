@@ -11,8 +11,9 @@
 // ping-pong 缓冲多写入者交替翻转会让彼此槽位读到隔帧旧面（无 flip.* 的引擎语义免疫方案）；
 // colortex1 的 tile 逻辑对全部光栅像素照常执行（colortex7 槽位区域与 tile0 在 uv 上重叠——
 // 1080p 下 LUT 完整落在 tile0 的 [0,0.25]² 内——两缓冲互不相干、各按自己的规则写）：
-//   - 天空 view LUT（atmosphere/sky.glsl）：太阳 / 月亮半区各 200×100；帧常量与光源路径
-//     光学深度在 vsh 预计算，低于地平线阈值的非活动光源整半区写 0，其余 texel 求 Chapman 解析；
+//   - 天空 view LUT（atmosphere/sky.glsl）：太阳 / 月亮半区各 200×100；帧常量、光源路径
+//     光学深度与多次散射环境场在 vsh 预计算，低于地平线阈值的非活动光源整半区写 0，
+//     其余 texel 求 Chapman 解析 + 环境场 MS 再散射；
 //     deferred_init 全分辨率天空自此改 LUT 双线性采样、两半区和式
 //   - 自动曝光寄生存储（春v2 同款 pass 设计）：曝光槽位（杂项簇 gutter，exposure.glsl 的
 //     exposureTexel）测图集最粗 tile（tile4）对数平均亮度（春雷算法、固定 16 点核）、与槽位
@@ -44,6 +45,8 @@ VARYING vec3 vSkySunDirection;
 VARYING vec3 vSkyMoonDirection;
 VARYING vec3 vSkySunOpticalDepth;
 VARYING vec3 vSkyMoonOpticalDepth;
+VARYING vec3 vSkySunAmbientField;
+VARYING vec3 vSkyMoonAmbientField;
 #endif
 
 // ================================ FRAGMENT ================================
@@ -96,13 +99,14 @@ void main() {
         vec3 lightDirection = sunHalf ? vSkySunDirection : vSkyMoonDirection;
         vec3 lightOpticalDepth = sunHalf ? vSkySunOpticalDepth : vSkyMoonOpticalDepth;
         vec3 irradiance = sunHalf ? SOLAR_IRRADIANCE : MOON_IRRADIANCE;
+        vec3 ambientField = sunHalf ? vSkySunAmbientField : vSkyMoonAmbientField;
 
         // 光源低于地平线约 8.6° 后整半区写黑：该区间散射在曝光上限内不可见，
         // 统一分支跳过每 texel 的 Chapman 视线路径与相函数求值；alpha 仍写专用标记表示 LUT 有效。
         vec3 skyColor = vec3(0.0);
         if (lightDirection.y > SKY_LIGHT_MIN_HEIGHT) {
             skyColor = skyViewLutTexel(localPos, vSkyObserverRadius, vSkyHorizon,
-                                       lightDirection, lightOpticalDepth, irradiance);
+                                       lightDirection, lightOpticalDepth, irradiance, ambientField);
         }
         outMisc = vec4(skyColor, SKYVIEW_LUT_VALID_MARKER);
     } else if (pixel == exposureTexel()) {
@@ -135,8 +139,10 @@ void main() {
     rectMax = max(rectMax, bloomMiscRectMax());
 
     // LUT 帧常量：全屏 quad 各顶点写同值，片段阶段精确插值还原。
-    // 光源方向、观察者地平线和起点 -> 光源的大气消光各帧只计算 3~4 次，
-    // 不再由 40k 个 LUT texel 重复执行矩阵换算、sqrt/acos 与三介质 Chapman。
+    // 光源方向、观察者地平线、起点 -> 光源的大气消光与多次散射环境场（atmosphere.glsl 的
+    // skyAmbientField——48 节点光源锚定环带求积，一阶天光球面平均 × 几何级数 1/(1-ρ)）
+    // 各帧只计算 3~4 次，不再由 40k 个 LUT texel 重复执行矩阵换算、sqrt/acos、三介质 Chapman
+    // 与环境场求积；环境场与半区写黑同一阈值门控（低于地平线的光源无散射、场为 0）
     vSkyObserverRadius = EARTH_RADIUS + max(cameraPosition.y, 1.0);
     float altitudeTerm = max((vSkyObserverRadius - EARTH_RADIUS)
                            * (vSkyObserverRadius + EARTH_RADIUS), 0.0);
@@ -148,6 +154,12 @@ void main() {
     vSkyMoonDirection = moonDirectionWorld();
     vSkySunOpticalDepth = opticalDepthToSpace(vSkyObserverRadius, vSkySunDirection.y);
     vSkyMoonOpticalDepth = opticalDepthToSpace(vSkyObserverRadius, vSkyMoonDirection.y);
+    vSkySunAmbientField = vSkySunDirection.y > SKY_LIGHT_MIN_HEIGHT
+        ? skyAmbientField(vSkyObserverRadius, vSkySunDirection, vSkySunOpticalDepth, SOLAR_IRRADIANCE)
+        : vec3(0.0);
+    vSkyMoonAmbientField = vSkyMoonDirection.y > SKY_LIGHT_MIN_HEIGHT
+        ? skyAmbientField(vSkyObserverRadius, vSkyMoonDirection, vSkyMoonOpticalDepth, MOON_IRRADIANCE)
+        : vec3(0.0);
 #endif
     vec2 rectUv = quadUv * rectMax;
     pos.xy = (rectUv * 2.0 - 1.0) * pos.w;

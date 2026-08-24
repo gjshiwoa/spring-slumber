@@ -18,8 +18,10 @@
 // 其末段的 linearToSrgb 是唯一离开线性空间的位置
 // 几何光照：读 colortex4（albedo + 高光）、colortex5（观察空间法线 + 原始 lmcoord，重映射见
 // pipeline/gbuffer_data.glsl remapLightmap）、去抖 uv + depthtex1 原始深度重建观察空间位置后经
-// lib/lighting/lighting.glsl 的 shadeSurface 着色（直接光 = shadowtex 阴影可见性 × solarTransmittance
-// 直射辐照度，光源方向 / 时间 / 颜色基色取 vsh 帧数据，见 lib/lighting/shadow.glsl）
+// lib/lighting/lighting.glsl 的 shadeSurface 着色（直接光 = shadowtex 阴影可见性 × 相机高度近似的大气透射率
+// × 直射辐照度；透射率与光源方向 / 时间 / 颜色基色均由 vsh 帧数据提供，见 lib/lighting/shadow.glsl）
+
+#define FULLSCREEN_DIRECT_TRANSMITTANCE
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/utils/color.glsl"
@@ -31,21 +33,23 @@
 #include "/lib/common/utils/filters.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
-#include "/program/fullscreen_vsh.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
+#include "/program/fullscreen_vsh.glsl"
 #include "/lib/atmosphere/sky.glsl"
 #include "/lib/lighting/shadow.glsl"
 #ifdef STAGE_FRAGMENT
 // 通用全屏 vsh 输出的帧数据——按需 in 声明；须位于 lighting.glsl 之前（shadeSurface 直接引用
-// 同名全局），getSkyColor 的方向 / 地平线经参数传入
+// 同名全局），getSkyColor 的方向 / 地平线 / LUT 有效性经参数传入
 in vec2 vJitter;
 in vec3 vSunDirection;
 in vec3 vMoonDirection;
 in vec3 vLightDirection;
 in float vSunHeight;
 in vec3 vDirectIrradiance;
+in vec3 vDirectTransmittance;
 in vec3 vSkyAmbient;
 in vec3 vHorizon;
+flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁器 / 部分驱动所容）
 #endif
 #include "/lib/lighting/lighting.glsl"
 
@@ -72,9 +76,11 @@ void main() {
         // 天空视线：z = 1 经 screenToView 落在远平面上（不归一化，getSkyColor 内部归一）；
         // getSkyColor 为 colortex7 sky-view LUT 双线性采样（composite12 上一帧生成，滞后一帧
         // 无视觉差异），composite_taa 的时间累积把 16 相位亚像素采样解析成抗锯齿
-        //（大气地平线高频边界不再锯齿）
+        //（大气地平线高频边界不再锯齿）；非活动半区（光源低于 SKY_LIGHT_MIN_HEIGHT、
+        // 生成端整区写 0）由 getSkyColor 内部门控跳过 fetch，有效性取 vsh 探针
+        //（vSkyLutValid，无效即首帧 / 缓冲重建回退轻量天空）
         color = getSkyColor(screenToView(vec3(uv, 1.0)),
-                            vSunDirection, vMoonDirection, vHorizon);
+                            vSunDirection, vMoonDirection, vHorizon, vSkyLutValid > 0.5);
     } else {
         // 几何光照：colortex4.rg 解包 albedo（sRGB，反 gamma），colortex5.rg 八面体观察空间法线、
         // .ba 原始 lmcoord 重映射；viewPos = 去抖 uv + 本像素原始深度
@@ -84,7 +90,7 @@ void main() {
         vec3 normalView = decodeOctahedral(gNormalLm.rg);
         vec2 lm = remapLightmap(gNormalLm.ba);
         vec3 viewPos = screenToView(vec3(uv, depth));
-        color = shadeSurface(albedo, normalView, lm, viewPos);
+        color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance);
     }
     outColor = vec4(color, 1.0);
 }

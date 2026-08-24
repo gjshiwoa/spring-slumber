@@ -61,7 +61,7 @@ const vec3  OZONE_EXTINCTION_COEFFICIENTS = vec3(1.021e-6, 2.474e-6, 1.015e-7);
 const vec3  SOLAR_IRRADIANCE = vec3(236.8, 206.4, 204.9);                     // 大气顶太阳辐照度（相对单位）
 const vec3  MOON_IRRADIANCE  = SOLAR_IRRADIANCE * 5.0e-4; // 大气顶月亮辐照度（春雷同值 2.5e-6×2e2：真实满月 ~1/40万，游戏取 ~1/2000 保夜景可见；天空 LUT 月亮半区光源）
 const float SKY_BRIGHTNESS   = 1.0;  // 天空色整体缩放：对齐 albedo 0~1 的画面量级（进游戏后校准）
-const float SKY_LIGHT_MIN_HEIGHT = -0.2; // LUT 光源低于地平线约 8.6° 后散射已不可见，整半区写 0 跳过 Chapman 求值
+const float SKY_LIGHT_MIN_HEIGHT = -0.15; // LUT 光源低于地平线约 8.6° 后散射已不可见，整半区写 0 跳过 Chapman 求值；采样端 getSkyColor 以同一常量门控跳过该半区的参数化与 fetch——安全不变式「采样端跳过区域 ⊆ 生成端写黑区域」由两侧共用本常量结构性保证，绝不在采样端写独立数值。数值验证（海平面 ~ 山顶不变）：可见曙暮光弧的衰减悬崖在 -0.05 ~ -0.10（7 个数量级），本阈值深居死区（阈值处天空最大 luma ~5e-9，×720 曝光上限后仍低于 8bit LSB 三个数量级），隔帧光源移动 0.005° 的边界差不可见
 const float SKYVIEW_LUT_VALID_MARKER = 0.625; // LUT alpha 有效标记（RGBA16F 精确值），区别于清零 / 旧版 alpha=1 / 未初始化内容
 // float32 数值防护（夜晚 / 下视溢出的根源是 erfcx 负参量分支 exp(b²)、b 可达 r/H ~ 45 → b² ~ 2000 溢出 Inf）
 const float SKY_ERFCX_EXP_MAX = 80.0; // erfcx 负支 exp 上限：2·e^80 ≈ 1.1e35 有限，对应光学深度早已全遮蔽、钳顶无损
@@ -75,6 +75,17 @@ const float MIE_PHASE_G1 = 0.862;              // HG 主叶前向强度
 const float MIE_PHASE_G2 = 0.5069161813017329; // Draine 次叶
 const float MIE_PHASE_A  = 250.0;              // Draine 各向异性因子
 const float MIE_PHASE_W  = 0.24075857115188248; // 混合权重
+
+// 各向同性环境场多次散射（atmosphere.glsl 的 skyAmbientField / atmosphericRadiance MS 项）：
+// 二阶起近似为各向同性辐射场，量级 = 一阶散射天光球面方向平均（48 节点光源锚定环带求积，
+// composite12 vsh 每帧每光源一次）× 几何级数 1/(1-ρ)；视线端 MS 项 = ambientCapture × 环境场，
+// 路径量全部复用单次散射已算的 airMass。float32 数值验证（海平面、太阳 +60° 正午）：
+// 余弦加权天光辐照度 ×1.069/×1.116/×1.260（R/G/B）、天顶 ×1.10~1.17、反日侧暮光地平线
+// ×1.6~1.7、太阳侧 ×1.16~1.41；夜空地板不被抬高（太阳 -20° 最大 luma 5.1e-10，×720 曝光后不可见）
+const float SKY_MS_STRENGTH     = 1.0; // MS 整体强度（0 = 退回纯单次散射）；偏好更强暮光弧 / 地平线抬升可上调，参考范围 1.0~2.0
+const int   SKY_MS_QUAD_BANDS    = 8;   // 环境场球面求积环带数（Δcosθ 等间距 = 等立体角；最内环带节点 θ ≈ 29°，避开 Mie 窄前向峰）
+const int   SKY_MS_QUAD_AZIMUTHS = 6;   // 每环带方位节点数（带间黄金角错位防与光源几何对齐）；× BANDS = 48 节点
+const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测 ≤ ~0.30，防御极端海拔 / 数值垃圾撑爆几何级数分母）
 
 // ---- 信标光柱（gbuffers_beacon，春雷同值）----
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
@@ -136,7 +147,7 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 // 直射 = albedo/π × mix(MOON_IRRADIANCE, SOLAR_IRRADIANCE, day) × solarTransmittance(表面点 -> 光源) × NdotL × 阴影可见性；
 // 大气顶辐照度直接复用大气常量（与天空 LUT 同源——sky:direct 亮度比物理一致，绝对量级随 SKY_BRIGHTNESS 与天空一起统调）；
 // 环境光 / 方块光同为辐照度形式，与直射共用同一个 albedo/π
-const vec3 DAY_SKY_AMBIENT   = vec3(6.0, 8.0, 14.0);        // 白天天空环境辐照度 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；单次散射模型无多次散射加成），进游戏统调
+const vec3 DAY_SKY_AMBIENT   = vec3(6.4, 8.9, 17.6);        // 白天天空环境辐照度 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；多次散射接入后按正午辐照度增幅 ×1.069/×1.116/×1.260 重定——见 SKY_MS_STRENGTH 注释），进游戏统调
 const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4;    // 夜晚 = 月亮辐照度比（与 MOON_IRRADIANCE 同源，春雷 1/2000）；夜晚过暗只抬 MOON_IRRADIANCE 单旋钮
 const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20) * PI; // 方块光辐照度（π × 旧 albedo 直乘时代的量级，行为不变）
 const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底（gameplay 地板，刻意低于物理夜天光），避免纯黑不可见
