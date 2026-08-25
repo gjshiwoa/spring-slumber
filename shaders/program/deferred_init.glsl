@@ -29,6 +29,7 @@
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/utils/space.glsl"
+#include "/lib/common/utils/noise.glsl"
 #include "/lib/common/utils/jitter.glsl"
 #include "/lib/common/utils/filters.glsl"
 #include "/lib/post/bloom.glsl"
@@ -44,7 +45,6 @@ in vec2 vJitter;
 in vec3 vSunDirection;
 in vec3 vMoonDirection;
 in vec3 vLightDirection;
-in float vSunHeight;
 in vec3 vDirectIrradiance;
 in vec3 vDirectTransmittance;
 in vec3 vSkyAmbient;

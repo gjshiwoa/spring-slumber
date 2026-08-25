@@ -1,4 +1,6 @@
-// 阴影贴图采样核心（写入端 program/shadow.glsl 与本文件读取端共用同一套扭曲 / 压缩公式，须逐字符对称）
+// 阴影贴图采样核心；写读两侧共用的扭曲 / 压缩公式在 lib/common/utils/space.glsl
+//（shadowDistort / relativeWorldToShadowScreen——写入端 program/shadow.glsl 与本文件共用同一实现，
+//   对称性由共用结构性保证）
 // 路线（24 包调研定档，低配 / 高兼容）：线性 distortion（春v2 / BSL / Kappa 同族）+ shadowtex0 硬件比较
 // 黄金螺旋 PCF（IGN 时域旋转，composite_taa 时间累积收敛为软阴影，零额外 pass）+ shadowtex1 裸深度手动
 // 比较分离半透明遮挡、取 shadowcolor0 透射色上彩色阴影（春v2 getColorShadow 同款）
@@ -6,49 +8,22 @@
 // search 共用的后路——升级 PCSS 只需在本文件加 blocker search（读 tex1 浅于接收者的平均遮挡深度推半影
 // 半径，替换下方常数半径），引擎配置零改动
 // 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：
-//   lib/common/globals/constants.glsl（阴影常量）、lib/common/globals/uniforms.glsl（shadow 矩阵与采样器、
-//   frameCounter、rainStrength）、lib/common/utils/color.glsl（srgbToLinear）
+//   lib/common/globals/constants.glsl（阴影常量）、lib/common/globals/uniforms.glsl（shadow 采样器、
+//   shadowDistance、rainStrength）、lib/common/utils/color.glsl（srgbToLinear）、
+//   lib/common/utils/space.glsl（shadowDistort / relativeWorldToShadowScreen）、
+//   lib/common/utils/noise.glsl（interleavedGradientNoise——PCF 时域抖动）
 #ifndef LIB_SHADOW_GLSL
 #define LIB_SHADOW_GLSL
-
-// ---------------- 变换（写读两侧同一公式，任意阶段可用） ----------------
-
-// 线性扭曲因子：中心（d = 0）为 1 - SHADOW_DISTORT_FACTOR = 0.15，纹素密度放大约 6.7 倍；边缘（d = 1）为 1 不缩放
-float shadowDistortFactor(vec2 ndcXY) {
-    return length(ndcXY) * SHADOW_DISTORT_FACTOR + (1.0 - SHADOW_DISTORT_FACTOR);
-}
-
-// 扭曲 shadow NDC xy（正交投影 w = 1，clip 与 NDC 同值）
-vec2 shadowDistort(vec2 ndcXY) {
-    return ndcXY / shadowDistortFactor(ndcXY);
-}
-
-// 相对世界空间 -> shadow 屏幕 [0,1]：xy 扭曲、z 压缩——与 program/shadow.glsl 写侧
-// gl_Position 的逐字符对称（读取端比写侧多一步 NDC -> [0,1] 映射）；
-// distortFactor 输出未扭曲 NDC 处的局部放大补偿（PCF 半径 / 未来 blocker search 用）
-vec3 relativeWorldToShadowScreen(vec3 relativeWorldPos, out float distortFactor) {
-    vec4 clipPos = shadowProjection * shadowModelView * vec4(relativeWorldPos, 1.0);
-    vec3 ndcPos = clipPos.xyz; // 正交 w = 1
-    distortFactor = shadowDistortFactor(ndcPos.xy);
-    return vec3(shadowDistort(ndcPos.xy), ndcPos.z * SHADOW_DEPTH_SCALE) * 0.5 + 0.5;
-}
 
 #ifdef STAGE_FRAGMENT
 
 // ---------------- 采样（仅片段阶段） ----------------
 
-// IGN 时域抖动噪声（interleaved gradient noise + 帧序 golden ratio 偏移，Photon 同款，3 条 ALU 无纹理）：
-// 逐像素旋转 / 抖动 PCF 采样盘，composite_taa 时间累积把噪声解析成收敛的软阴影
-float shadowDither(vec2 pixelPos) {
-    return fract(52.9829189 * fract(dot(pixelPos, vec2(0.06711056, 0.00583715))
-                                    + float(frameCounter % 64) * 0.61803399));
-}
-
 // 阴影可见性（rgb，1 = 全亮，被半透明遮挡处为其透射色——彩色阴影）
 // relativeWorldPos 相对世界空间位置（未加 normal offset，函数内部加；由 shadeSurface 统一换算一次传入）
 // normalWorld 世界系法线（归一化）
 // ndl         世界系 NdotL（未截断；正值才调用，负值背光面由调用方直接全影）
-// distWorld   相机距离；出屏 / 超距返回 1（回退门控由 lighting.glsl 用 lm 天空光近似混合）
+// distWorld   相机距离；出屏 / 超距返回 1（贴图覆盖外按全亮，无回退门控）
 vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, float distWorld) {
     if (distWorld > shadowDistance) return vec3(1.0);
 
@@ -69,8 +44,8 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
                        + 2.0 * rainStrength;
     float radius = radiusTexels / (distortFactor * float(shadowMapResolution));
 
-    float rotation = shadowDither(gl_FragCoord.xy) * TAU;
-    float radialJitter = shadowDither(gl_FragCoord.yx);
+    float rotation = interleavedGradientNoise(gl_FragCoord.xy) * TAU;
+    float radialJitter = interleavedGradientNoise(gl_FragCoord.yx);
 
     vec3 visibilitySum = vec3(0.0);
     for (int i = 0; i < SHADOW_PCF_SAMPLES; i++) {
@@ -80,17 +55,23 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
         float theta = fi * GOLDEN_ANGLE + rotation;
         vec2 tapUv = shadowPos.xy + r * vec2(cos(theta), sin(theta));
 
-        // 基础可见性：shadowtex0（全几何，含半透明）硬件比较——一次 texture 顶手动 2×2 双线性比较
-        // （GLSL 330 中 sampler2DShadow 的 texture() 返回 float 标量）
-        float allVis = texture(shadowtex0, vec3(tapUv, shadowPos.z));
+        // 基础可见性：shadowtex0（全几何，含半透明）硬件比较——一次采样顶手动 2×2 双线性比较
+        // （GLSL 330 中 sampler2DShadow 的比较采样返回 float 标量；textureLod 重载同样支持，
+        //   LOD 0 显式指定免隐式导数——深度图无 mip，恒采最高细节层）
+        float allVis = textureLod(shadowtex0, vec3(tapUv, shadowPos.z), 0.0);
 
         vec3 tapVisibility = vec3(allVis);
         if (allVis < 1.0) {
-            // 有遮挡：tex1 裸深度（仅不透明）手动比较，opaqueVis > 0 即非不透明遮挡——
-            // 取 shadowcolor0 透射色上彩色阴影（染色玻璃 / 水下偏暗带蓝），不透明遮挡保持全影
-            float opaqueVis = step(shadowPos.z, textureLod(shadowtex1, tapUv, 0.0).r);
+            // 有遮挡：tex1 裸深度（仅不透明）texelFetch 精确纹素手动比较，opaqueVis > 0 即非不透明
+            // 遮挡——取 shadowcolor0 透射色上彩色阴影（染色玻璃 / 水下偏暗带蓝），不透明遮挡保持全影
+            //（texelFetch 免滤波路径且免隐式导数：深度双线性插值无物理意义、且与引擎给 shadowtex
+            //  设的过滤模式解耦；shadowcolor0 与 tex1 同分辨率同布局、同纹素取色——判定遮挡的 texel
+            //  与取色的 texel 恒一致；tap 可越出 [0,1]，texture() 的 clamp-to-edge 由钳边显式承担）
+            ivec2 tapTexel = clamp(ivec2(tapUv * float(shadowMapResolution)),
+                                   ivec2(0), ivec2(shadowMapResolution - 1));
+            float opaqueVis = step(shadowPos.z, texelFetch(shadowtex1, tapTexel, 0).r);
             if (opaqueVis > 0.0) {
-                tapVisibility = mix(srgbToLinear(texture(shadowcolor0, tapUv).rgb), vec3(1.0), allVis);
+                tapVisibility = mix(srgbToLinear(texelFetch(shadowcolor0, tapTexel, 0).rgb), vec3(1.0), allVis);
             }
         }
         visibilitySum += tapVisibility;

@@ -1,7 +1,9 @@
 // 坐标空间构造工具（对应春雷 utils/space.glsl 的 TBN 部分）
 // TBN 部分仅片段阶段可用（dFdx / dFdy）；坐标换算函数任意阶段可用
 // 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/common/globals/uniforms.glsl
-//（gbufferProjectionInverse / gbufferModelViewInverse / previous 系矩阵与 cameraPosition 系——坐标换算函数所需）
+//（gbufferProjectionInverse / gbufferModelViewInverse / previous 系矩阵与 cameraPosition 系——坐标换算函数所需；
+//   阴影换算另需 shadowProjection / shadowModelView）、lib/common/globals/constants.glsl（阴影扭曲 / 压缩
+//   常量——仅阴影换算部分需要）
 #ifndef LIB_SPACE_GLSL
 #define LIB_SPACE_GLSL
 
@@ -43,6 +45,29 @@ vec2 viewDirectionToPreviousScreen(vec3 dirView) {
     vec4 prevClip = gbufferPreviousProjection * gbufferPreviousModelView
                   * vec4(viewToWorldDirection(dirView), 0.0);
     return prevClip.xy / prevClip.w * 0.5 + 0.5;
+}
+
+// ---------------- 阴影屏幕换算（写读两侧同一实现，任意阶段可用） ----------------
+
+// 线性扭曲因子：中心（d = 0）为 1 - SHADOW_DISTORT_FACTOR = 0.15，纹素密度放大约 6.7 倍；边缘（d = 1）为 1 不缩放
+float shadowDistortFactor(vec2 ndcXY) {
+    return length(ndcXY) * SHADOW_DISTORT_FACTOR + (1.0 - SHADOW_DISTORT_FACTOR);
+}
+
+// 扭曲 shadow NDC xy（正交投影 w = 1，clip 与 NDC 同值）；写入端 program/shadow.glsl 与
+// 读取端 lib/lighting/shadow.glsl 共用本实现——对称性由共用结构性保证（原本分居写读两文件、须逐字符对称）
+vec2 shadowDistort(vec2 ndcXY) {
+    return ndcXY / shadowDistortFactor(ndcXY);
+}
+
+// 相对世界空间 -> shadow 屏幕 [0,1]：xy 扭曲、z 压缩——与 program/shadow.glsl 写侧
+// gl_Position 的逐字符对称（读取端比写侧多一步 NDC -> [0,1] 映射）；
+// distortFactor 输出未扭曲 NDC 处的局部放大补偿（PCF 半径 / 未来 blocker search 用）
+vec3 relativeWorldToShadowScreen(vec3 relativeWorldPos, out float distortFactor) {
+    vec4 clipPos = shadowProjection * shadowModelView * vec4(relativeWorldPos, 1.0);
+    vec3 ndcPos = clipPos.xyz; // 正交 w = 1
+    distortFactor = shadowDistortFactor(ndcPos.xy);
+    return vec3(shadowDistort(ndcPos.xy), ndcPos.z * SHADOW_DEPTH_SCALE) * 0.5 + 0.5;
 }
 
 #ifdef STAGE_FRAGMENT

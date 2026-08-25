@@ -45,7 +45,8 @@ uniform float rainStrength; // 雨强度 [0,1]
 uniform mat4 shadowModelView; // 相对世界（当帧相机为原点、与 gbufferModelView 同源空间）-> shadow 视图
 uniform mat4 shadowProjection; // shadow 视图 -> shadow 裁剪（正交）
 // shadowtex0 开硬件比较（constants.glsl 的 shadowHardwareFiltering0）、声明为 sampler2DShadow：
-// texture() 即深度比较 + 2×2 双线性插值，一次采样顶手动 4 次比较
+// 比较采样即深度比较 + 2×2 双线性插值，一次采样顶手动 4 次比较（GLSL 330 的 textureLod
+// 重载同样走硬件比较滤波，采样端显式 LOD 0 免隐式导数）
 uniform sampler2DShadow shadowtex0; // 全几何深度（含半透明）：基础可见性 PCF
 // shadowtex1 不开硬件比较、保持 sampler2D 裸读（仅不透明几何）——彩色阴影遮挡分离与
 // 未来 PCSS blocker search 共用的后路（春v2 同布置）

@@ -144,19 +144,30 @@ const float TAA_DEPTH_CONF_EDGE0    = 0.02; // 深度置信 smoothstep 下沿（
 const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 
 // ---- 光照（lib/lighting/lighting.glsl，已接入 deferred_init；直接光物理化，春雷 shading.glsl 同构）----
-// 直射 = albedo/π × mix(MOON_IRRADIANCE, SOLAR_IRRADIANCE, day) × solarTransmittance(表面点 -> 光源) × NdotL × 阴影可见性；
+// 统一时间系统（program/fullscreen_vsh.glsl 一次算好经 varying 传入；春v2 isNoon/isNight、
+// 春雷 isDay/isNight（shaders.properties 自定义 uniform）同构）：太阳 / 月亮各自世界高度的线性门
+// clamp [0,1]。MC 日月恰好相对（moonHeight ≈ -sunHeight），两门永不同时为正——直射辐照度取门控
+// 加权和，即「按光源选边 + 主光源切换瞬间（光源过地平线）两门同为 0、直射光为黑过渡」；
+// 替代旧昼夜 mix（mix 在日出前就混入太阳辐照度，再被低角度透射率染红——晨昏直射光成了
+// 「红色太阳光」而非黑色过渡）。月亮门斜率倍陡（春v2 NOON/NIGHT_DURATION 20/40 同值）：
+// 月亮低角度时透射率已深红，门快速关闭把红月落压成暗过渡；太阳侧保留物理红化（红日出是预期）。
+// 斜率 20 = 高度 0→0.05（约 2.9°）淡入。
+const float TIME_NOON_RAMP  = 20.0; // 太阳直射门斜率（春v2 NOON_DURATION 同值）
+const float TIME_NIGHT_RAMP = 40.0; // 月亮直射门斜率（春v2 NIGHT_DURATION 同值；斜率 40 = 0→0.025 约 1.4° 淡入）
+// 直射 = albedo/π × (noon×SOLAR_IRRADIANCE + night×MOON_IRRADIANCE) × solarTransmittance(表面点 -> 光源) × NdotL × 阴影可见性；
 // 大气顶辐照度直接复用大气常量（与天空 LUT 同源——sky:direct 亮度比物理一致，绝对量级随 SKY_BRIGHTNESS 与天空一起统调）；
 // 环境光 / 方块光同为辐照度形式，与直射共用同一个 albedo/π
-const vec3 DAY_SKY_AMBIENT   = vec3(6.4, 8.9, 17.6);        // 白天天空环境辐照度 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；多次散射接入后按正午辐照度增幅 ×1.069/×1.116/×1.260 重定——见 SKY_MS_STRENGTH 注释），进游戏统调
-const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4;    // 夜晚 = 月亮辐照度比（与 MOON_IRRADIANCE 同源，春雷 1/2000）；夜晚过暗只抬 MOON_IRRADIANCE 单旋钮
+const float SKY_AMBIENT_BRIGHTNESS = 5.3; // 天空环境辐照度 = LUT 天顶色 × 本系数（fullscreen_vsh 的 vSkyAmbient 主路径）：天顶辐射率 → 半球环境辐照度换算 ≈ π × 1.7（π × 余弦加权天光平均 / 天顶的正午比值，含 MS），初值校准使正午幅度与旧 DAY_SKY_AMBIENT（luma ~9.0）一致——月夜同链缩放（月亮辐照度比 5e-4）恰近旧 NIGHT_SKY_AMBIENT；色调 / 幅度均取自天顶结果、昼夜 / 曙暮光 / 海拔自动跟进，进游戏统调天光亮度的主旋钮
+const vec3 DAY_SKY_AMBIENT   = vec3(6.4, 8.9, 17.6);        // 白天天空环境辐照度回退值 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；多次散射接入后按正午辐照度增幅 ×1.069/×1.116/×1.260 重定——见 SKY_MS_STRENGTH 注释）；vSkyAmbient 主路径已改为 LUT 天顶色 × SKY_AMBIENT_BRIGHTNESS（fullscreen_vsh.glsl），本常量仅在 LUT 无效的回退路径（vSkyAmbient 回退 / sky.glsl fallbackSkyColor）生效
+const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4;    // 夜晚回退值 = 月亮辐照度比（与 MOON_IRRADIANCE 同源，春雷 1/2000）；正常路径下天顶色随月亮辐照度同链缩放，夜晚过暗只抬 MOON_IRRADIANCE 单旋钮
 const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20) * PI; // 方块光辐照度（π × 旧 albedo 直乘时代的量级，行为不变）
 const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底（gameplay 地板，刻意低于物理夜天光），避免纯黑不可见
 
 // ---- 阴影（program/shadow.glsl 写入端 + lib/lighting/shadow.glsl 采样端）----
 // 引擎指令前五条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0）由 OptiFine/Iris 扫描
 const int   shadowMapResolution      = 2048;   // 阴影贴图边长（texel）；128m 距离下每米 8 texel，中心区经扭曲再放大约 6.7 倍
-const float shadowDistance           = 128.0;  // 阴影覆盖半径（米）；采样端超出即回退 skyLight 门控（lib/lighting/lighting.glsl）
-const float shadowDistanceRenderMul  = 1.0;    // 超出 shadowDistance 的几何不进阴影渲染（省填充率，淡出兜底视觉）
+const float shadowDistance           = 128.0;  // 阴影覆盖半径（米）；采样端超出即返回 1 全亮（贴图覆盖外无阴影，lib/lighting/shadow.glsl）
+const float shadowDistanceRenderMul  = 1.0;    // 超出 shadowDistance 的几何不进阴影渲染（省填充率——超距采样本就按全亮）
 const float sunPathRotation          = -30.0;  // 太阳轨迹倾角（度，春雷同值）：正午太阳不过天顶、影子不退化；天空与光照方向自动一致
 const bool  shadowHardwareFiltering0 = true;   // 仅 shadowtex0 开硬件深度比较（声明为 sampler2DShadow）；
                                               // shadowtex1 不开、保持 sampler2D 裸深度（仅不透明几何）——彩色阴影遮挡分离与
@@ -168,6 +179,5 @@ const float SHADOW_RADIUS_BASE    = 0.25;   // 基础软半径（texel）
 const float SHADOW_RADIUS_DIST    = 2.0;   // 随相机距离增长的半径上限（texel）
 const float SHADOW_BIAS_NORMAL    = 0.05;  // normal offset 基数（世界单位，随距离 / 坡度放大，春v2 同思路）
 const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（进游戏按痤疮 / 悬空影微调）
-const float SHADOW_FADE_BEGIN     = 0.8;   // 距离淡出起点（× shadowDistance），终点 = shadowDistance
 
 #endif
