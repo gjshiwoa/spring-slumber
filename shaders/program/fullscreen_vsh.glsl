@@ -42,7 +42,7 @@
 // 大气与光照常量、SKYVIEW_*）、lib/common/globals/uniforms.glsl（光源位置 / sunAngle / rainStrength /
 // cameraPosition / colortex7 / frameCounter，视口与 frameCounter 经 jitter）、
 // lib/common/utils/space.glsl（viewToWorldDirection）、
-// lib/common/utils/jitter.glsl（taaJitterUV）、lib/post/exposure.glsl（readAdaptedExposure，
+// lib/common/utils/noise.glsl（taaJitterUV）、lib/post/exposure.glsl（readAdaptedExposure，
 // 连带 bloom / color / filters 依赖链）；定义 FULLSCREEN_DIRECT_TRANSMITTANCE 时还需先行 include
 // lib/atmosphere/atmosphere.glsl（opticalDepthToSpace）
 #ifndef PROGRAM_FULLSCREEN_VSH_GLSL

@@ -1,5 +1,5 @@
 // 自动曝光工具库：亮度算法参考春雷 passes/08_composite/auto_exposure.glsl
-// （bloom 图集最粗 tile 16 点均匀采样对数平均 + 0.18 key 直除 + 曝光域指数时间适应），
+// （bloom 图集最粗 tile 16 点均匀采样对数平均 + 0.18 key 直除 + 基础亮度地板 + 曝光域指数时间适应），
 // pass 设计参考春v2 program/composite21.glsl（寄生 bloom 链 pass 测光、单像素存储、
 // 写入区域透传跨帧保值，无 flip.* 依赖；春雷的 compute / SSBO 载体与本项目 GLSL 330 低配定位不符，只搬算法不搬载体）
 // 依赖先行 include：lib/common/globals/constants.glsl（AUTO_EXPOSURE_*）、
@@ -42,9 +42,11 @@ float sceneAverageLuminance() {
     return exp(logLumSum / float(EXPOSURE_SAMPLE_COUNT));
 }
 
-// 目标曝光（春雷同款 key value 直除，无曲线）
+// 目标曝光（春雷 key value 直除 + 基础亮度地板）：avgLum 先抬到 AUTO_EXPOSURE_BASE_LUMINANCE
+// 再直除——纯黑 / 深夜场景的对数平均远低于地板，曝光封顶在 KEY / BASE，夜晚 / 暗室不再被
+// 放大成白天；亮场景 avgLum >> 地板，直除行为不变
 float targetExposure(float avgLum) {
-    return clamp(AUTO_EXPOSURE_KEY_VALUE / avgLum, 1e-7, 1e7);
+    return clamp(AUTO_EXPOSURE_KEY_VALUE / max(avgLum, AUTO_EXPOSURE_BASE_LUMINANCE), 1e-7, 1e7);
 }
 
 // 时间适应（春雷同款指数平滑，帧率无关）：读 colortex7 槽位上一帧曝光向目标推进；

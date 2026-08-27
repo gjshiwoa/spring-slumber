@@ -7,7 +7,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/packing.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 
 VARYING vec4 vColor;
 
@@ -19,12 +19,13 @@ VARYING vec4 vColor;
 layout(location = 0) out vec4 outMaterial; // colortex4
 
 void main() {
-    // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）
+    // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）；
+    // 合成只作用于 rgb——物品标记不参与混合，a 通道整像素置空
     vec4 previous = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);
     vec3 previousColor = unpack2x16To4x8(previous.rg).rgb;
     vec3 color = mix(previousColor, vColor.rgb, vColor.a);
 
-    outMaterial = vec4(pack4x8To2x16(vec4(color, 1.0)), previous.ba);
+    outMaterial = vec4(pack4x8To2x16(vec4(color, MATERIAL_NONE)), previous.ba);
 }
 
 #endif

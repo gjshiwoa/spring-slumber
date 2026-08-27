@@ -1,21 +1,39 @@
 // 不透明 gbuffer: gbuffers_opaque
 // 不透明阶段，MRT 写两张（colortex0/1 不写，颜色由 deferred_init 解包 colortex4 后写出）：
-//   colortex4 = rg 打包 albedo（tex × 顶点色，4x8→2x16），ba 打包高光贴图 RGBA（4x8→2x16）
+//   colortex4 = rg 打包 albedo（tex × 顶点色，4x8→2x16；a 通道在 cutout 判定后复用为物品标记
+//               MATERIAL_*，terrain 入口由下方 gsh 段程序化判定植被），ba 打包高光贴图 RGBA（4x8→2x16）
 //   colortex5 = rg 八面体观察空间法线（贴图法线经导数 TBN 变换，无 normals 纹理时为几何法线），ba 原始 lmcoord（读取端再重映射）
 // albedo 存原始 sRGB（8bit 打包），反 gamma 由 deferred_init 侧统一处理；block / hand 入口复用本程序
-// fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
+// 植被判定为 terrain 入口专属的几何着色器（STAGE_GEOMETRY 段，春雷 isLikelyPlantTriangle 判据），
+// 按 per-triangle 分类经 flat varying 下传；block / hand 入口无 gsh、标记恒空
+// fsh 前半 / vsh 后半（+ 可选 gsh 段），入口文件用 STAGE_FRAGMENT / STAGE_VERTEX / STAGE_GEOMETRY 选择编译哪一段
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 
+// terrain 入口挂几何着色器（OPAQUE_GSH 由 world0/gbuffers_terrain.vsh 定义，block / hand 不定义）：
+// GLSL 单命名空间，gsh 的 in/out 不得同名——vsh 输出侧挂 vGsh 前缀给 gsh 消费、gsh 输出还原原名
+// 衔接 fsh（春v2 terrain 的 v_ 前缀同名法）；无 gsh 的入口 vsh 原名直连 fsh，编译路径不受影响
+#if defined STAGE_VERTEX && defined OPAQUE_GSH
+#define vTexCoord   vGshTexCoord
+#define vColor      vGshColor
+#define vLmcoord    vGshLmcoord
+#define vViewPos    vGshViewPos
+#define vMaterialID vGshMaterialID
+#endif
+
+// gsh 编译段自带 in/out 声明（数组 + 双向），不经过 VARYING 宏
+#ifndef STAGE_GEOMETRY
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
 VARYING vec2 vLmcoord;
 VARYING vec3 vViewPos;
+flat VARYING float vMaterialID; // 物品标记：terrain 由 gsh 程序化判定，其余入口 vsh 置 MATERIAL_NONE
+#endif
 
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
@@ -39,6 +57,10 @@ void main() {
 
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴（树叶等）
 
+    // alpha 的 cutout 职责已尽，albedo 的 a 通道槽位改存物品标记（植被 = gsh 程序化判定；
+    // block / hand 入口无 gsh、恒为 MATERIAL_NONE），随 pack4x8To2x16 一同压缩进 colortex4.rg
+    color.a = vMaterialID;
+
     // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
     // 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)，变换后即导数几何法线
     mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
@@ -53,6 +75,75 @@ void main() {
 
 #endif
 
+// ================================ GEOMETRY ================================
+#ifdef STAGE_GEOMETRY
+// 植被程序化判定（仅 terrain 入口挂接：world0/gbuffers_terrain.gsh；block / hand 入口无本段、
+// 标记走 vsh 的空值）。春雷 passes/06_gbuffers/terrain.glsl 的 isLikelyPlantTriangle 判据，两个
+// 几何 / 染色信号取或——纯程序化、不依赖 block.properties：
+//   垂直交叉面片：三角形几何法线近水平（面片垂直地面）且 xz 分量对角——原版草 / 花 / 苗的
+//     十字交叉模型两两正交再整体斜置 45°，法线落在对角方向；轴对齐墙面 / 门板对角度不足
+//   生物群系染色：三顶点平均顶点色 chroma 偏大——草 / 树叶等顶点色带绿色 tint，未染色几何近灰
+// 按三角形整体分类、经 flat varying 下传，fsh 写入 albedo a 通道（colortex4.rg 打包位）
+layout(triangles) in;
+layout(triangle_strip, max_vertices = 3) out;
+
+in vec2 vGshTexCoord[3];
+in vec4 vGshColor[3];
+in vec2 vGshLmcoord[3];
+in vec3 vGshViewPos[3];
+flat in float vGshMaterialID[3];
+
+out vec2 vTexCoord;
+out vec4 vColor;
+out vec2 vLmcoord;
+out vec3 vViewPos;
+flat out float vMaterialID;
+
+bool isLikelyPlantTriangle() {
+    // 三角形两邻边差向量旋转到世界轴向（viewToWorldDirection 纯旋转，平移对差向量无效）
+    vec3 edge0 = viewToWorldDirection(vGshViewPos[1] - vGshViewPos[0]);
+    vec3 edge1 = viewToWorldDirection(vGshViewPos[2] - vGshViewPos[0]);
+    vec3 geometricNormal = cross(edge0, edge1);
+    float areaSquared = dot(geometricNormal, geometricNormal);
+    if (areaSquared < 1e-8) return false; // 退化三角形（零面积）
+    geometricNormal *= inversesqrt(areaSquared);
+
+    vec2 horizontalNormal = abs(geometricNormal.xz);
+    float diagonalness = min(horizontalNormal.x, horizontalNormal.y)
+                       / max(max(horizontalNormal.x, horizontalNormal.y), 1e-5);
+    bool verticalCrossPanel = abs(geometricNormal.y) < PLANT_PANEL_MAX_Y
+                           && diagonalness > PLANT_PANEL_DIAGONAL;
+
+    vec3 averageColor = (vGshColor[0].rgb + vGshColor[1].rgb + vGshColor[2].rgb) / 3.0;
+    float colorChroma = max(averageColor.r, max(averageColor.g, averageColor.b))
+                      - min(averageColor.r, min(averageColor.g, averageColor.b));
+    bool tinted = colorChroma > PLANT_TINT_CHROMA_MIN;
+
+    return verticalCrossPanel || tinted;
+}
+
+void main() {
+    // vsh 置空、gsh 程序化补判；显式标记扩展点——未来 vsh 经 mc_Entity / block.properties 写入
+    // 显式标记时，此处仅在空标记时兜底（春雷 primitiveMarker 同构）
+    float primitiveMarker = vGshMaterialID[0];
+    if (primitiveMarker < 0.5 && isLikelyPlantTriangle()) {
+        primitiveMarker = MATERIAL_VEGETATION;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        vTexCoord   = vGshTexCoord[i];
+        vColor      = vGshColor[i];
+        vLmcoord    = vGshLmcoord[i];
+        vViewPos    = vGshViewPos[i];
+        vMaterialID = primitiveMarker;
+        gl_Position = gl_in[i].gl_Position; // vsh 已注入 TAA jitter，原样透传
+        EmitVertex();
+    }
+    EndPrimitive();
+}
+
+#endif
+
 // ================================= VERTEX =================================
 #ifdef STAGE_VERTEX
 
@@ -62,6 +153,7 @@ void main() {
     vTexCoord = gl_MultiTexCoord0.xy;
     vColor = gl_Color;
     vLmcoord = (gl_TextureMatrix[1] * gl_MultiTexCoord1).xy;
+    vMaterialID = MATERIAL_NONE; // 无显式标记来源（block.properties 为扩展点）；terrain 入口由 gsh 程序化补判
 }
 
 #endif

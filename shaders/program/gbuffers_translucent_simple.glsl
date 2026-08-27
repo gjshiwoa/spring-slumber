@@ -10,7 +10,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/utils/color.glsl"
 #include "/lib/common/globals/uniforms.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;

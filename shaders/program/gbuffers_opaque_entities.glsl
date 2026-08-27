@@ -9,7 +9,7 @@
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
@@ -37,6 +37,9 @@ void main() {
 
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
     color.rgb = mix(color.rgb, entityColor.rgb, entityColor.a);
+    // 上一行为 texcolor 的半透明混合、只作用于 rgb——物品标记不参与混合，
+    // a 通道整像素置空（实体入口无 gsh 程序化判定，标记槽位恒空）
+    color.a = MATERIAL_NONE;
 
     // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
     // 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)，变换后即导数几何法线

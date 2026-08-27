@@ -13,7 +13,7 @@
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
@@ -42,15 +42,17 @@ void main() {
 
     if (color.a < ALPHA_BEACON_CORE) {
         // 半透明外壳：手动合成进打包 albedo，背景 specular / 法线 / lm 原样写回
+        //（合成为 texcolor 的半透明混合、只作用于 rgb——物品标记不参与混合，a 通道整像素置空，
+        // 同像素背景的标记随重打包一并抹去，混合像素的标记本就无效）
         vec3 previousColor = unpack2x16To4x8(previousMaterial.rg).rgb;
         color.rgb = mix(previousColor, color.rgb, color.a);
-        outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, 1.0)), previousMaterial.ba);
+        outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), previousMaterial.ba);
         outDetail = texelFetch(colortex5, ivec2(gl_FragCoord.xy), 0);
     } else {
-        // 不透明核心：自发光整像素写 gbuffer
+        // 不透明核心：自发光整像素写 gbuffer（光柱非植被，标记槽位置空）
         vec3 viewNormal = geomNormalFromDerivatives(dp1, dp2);
         vec4 specularMap = vec4(0.0, 0.0, 0.0, BEACON_CORE_EMISSIVE);
-        outMaterial = vec4(pack4x8To2x16(color), pack4x8To2x16(specularMap));
+        outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), pack4x8To2x16(specularMap));
         outDetail = vec4(encodeOctahedral(viewNormal), vec2(0.0));
     }
 }

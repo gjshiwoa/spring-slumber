@@ -16,7 +16,7 @@
 #include "/lib/common/utils/color.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/post/bloom.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/program/fullscreen_vsh.glsl"
 #include "/lib/post/taa.glsl"

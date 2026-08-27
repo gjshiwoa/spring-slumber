@@ -13,6 +13,7 @@ const int R11F_G11F_B10F = 0;
 const float TAU            = 6.28318530718;
 const float PI             = TAU * 0.5;
 const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
+const float GOLDEN_RATIO    = 0.61803398875; // 黄金比例共轭 1/φ（春v2 同值）：temporal 噪声帧间相位偏移（noise.glsl）
 const float ALPHA_CUTOUT   = 0.5;           // cutout 透贴裁剪阈值
 const float ambientOcclusionLevel = 0.0;    // 引擎指令：关闭原版 AO（光照由光影接管，不叠原版顶点暗角）
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
@@ -68,7 +69,7 @@ const float SKY_ERFCX_EXP_MAX = 80.0; // erfcx 负支 exp 上限：2·e^80 ≈ 1
 const float SKY_AIRMASS_MAX   = 1e15; // airMass 钳制上限：τ = βmax·1e15 ≈ 2.9e10 → exp(-τ) = 0；兼杀下视掠射闭式相消的负值 / NaN 垃圾。
 // 上限刻意远高于「exp 归零」所需：太阳沉入地平线后 sun 路 airMass 饱和于本值、tauS 停止增长，
 // energyIntegralRatio 的 (e^-a - e^-b)/(b-a) 残留 ~e^-tauV/tauS 尾巴——上限偏低时夜空冻结成恒定亮度地板
-// （1e9 时 ≈ 2e-4 luma，夜间自动曝光逼近 720× 上限后放大成可见辉光；月亮半区置黑也治不了，光在太阳半区）；
+// （1e9 时 ≈ 2e-4 luma，夜间自动曝光（上限随 AUTO_EXPOSURE_BASE_LUMINANCE 地板 18×、绝对后备 720×）放大成可见辉光；月亮半区置黑也治不了，光在太阳半区）；
 // 1e15 把地板压到 ~2e-10（曝光上限内不可见）。白天 / 曙暮光主段 airMass < 1e6 完全不触及钳制，数值不变
 // Mie 相函数 = HG(g1) 与 Draine(g2, a) 按权重 w 混合（Shadertoy 原调参，前向峰 + 适度后向）
 const float MIE_PHASE_G1 = 0.862;              // HG 主叶前向强度
@@ -91,8 +92,19 @@ const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
 const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写入 specular.a，labPBR emissive）
 
+// ---- 物品标记（colortex4 打包 albedo 的 a 通道 8bit 槽位，gbuffers_opaque gsh 植被判定）----
+// albedo 的 a 通道在 cutout 判定后职责已尽，槽位复用为物品类型标记，随 pack4x8To2x16 一同压缩
+//（读取端 unpack2x16To4x8(...).a × 255 判定）；编号高位段对齐春雷 objectMarker 系（251 起），
+// 252~255 预留 block.properties 显式标记扩展（春雷：252 矮草 / 253 高草 / 254 树叶 / 255 其他）
+const float MATERIAL_NONE       = 0.0;           // 无标记；texcolor 经半透明混合的程序（entityColor / 手动合成——混合只影响 rgb、标记不参与混合）整像素置空
+const float MATERIAL_VEGETATION = 251.0 / 255.0; // 植被：gbuffers_opaque 几何着色器程序化判定（春雷 objectMarkerPlantGeometry 同位）
+// 程序化判据阈值（春雷 isLikelyPlantTriangle 同值）：「垂直交叉面片」或「生物群系染色」二者取或
+const float PLANT_PANEL_MAX_Y     = 0.2;  // 三角形几何法线竖直分量上限——面片垂直地面（草 / 花 / 苗的十字交叉模型）
+const float PLANT_PANEL_DIAGONAL  = 0.55; // 法线 xz 分量 min/max 比下限——原版交叉面片两两正交再整体斜置 45°，法线落在对角方向；轴对齐墙面 / 门板达不到
+const float PLANT_TINT_CHROMA_MIN = 0.06; // 三顶点平均顶点色 chroma（max−min 分量差）下限——草 / 树叶带生物群系绿染色，未染色几何顶点色近灰
+
 // ---- Bloom（lib/post/bloom.glsl，无阈值，整幅 HDR 直接进金字塔）----
-const float BLOOM_STRENGTH = 0.15; // 泛光合成强度（tonemap 前线性域加法）
+const float BLOOM_STRENGTH = 0.075; // 泛光合成强度（tonemap 前线性域加法）
 const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春雷同值）：最大 tap 偏移为 ±2×此值（当前 ±4 源纹素）；总模糊半径由上采样回卷逐级累积保证，单级无需大步长（步长 4 在高频画面上跨步混叠，反而给图集带入网格）
 const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile）
 const float BLOOM_WEIGHT_SUM = 3.0; // ΣBLOOM_WEIGHTS；getBloom 归一化，修改权重时同步更新
@@ -104,8 +116,9 @@ const float max_ev       = 4.026069;  // AgX log2 窗口上界
 
 // ---- 自动曝光（lib/post/exposure.glsl，亮度算法春雷同值）----
 const float AUTO_EXPOSURE_RATE          = 2.0;     // 适应速度（1/s）：mix 因子 1 - exp(-frameTime * RATE)，帧率无关
-const float AUTO_EXPOSURE_KEY_VALUE     = 0.18;    // 目标亮度（18% 灰 key），targetExposure = KEY / avgLum
-const float AUTO_EXPOSURE_MIN_LUMINANCE = 0.00025; // log 下限保护，兼把曝光上限约束到 KEY / 此值 = 720（半精度安全）
+const float AUTO_EXPOSURE_KEY_VALUE      = 0.18;    // 目标亮度（18% 灰 key），targetExposure = KEY / max(avgLum, BASE)
+const float AUTO_EXPOSURE_BASE_LUMINANCE = 0.01;    // 基础亮度地板：avgLum 直除前先抬到此下限，曝光上限 = KEY / 此值 = 18。无地板时深夜 / 暗室的对数平均低至 1e-3 量级，曝光冲到 90~720 倍把夜晚拉成白天；月亮辐照度比 5e-4 下夜空 luma ~1e-3 量级，18 倍封顶后天顶 ~0.014 / 地平线 ~0.12（暗夜但月光可辨）。亮场景 avgLum >> 地板不受影响。进游戏嫌夜亮调大本值、嫌夜黑调小（有效旋钮是它，不是 MIN_LUMINANCE）
+const float AUTO_EXPOSURE_MIN_LUMINANCE  = 0.00025; // log 下限保护（log(0) 防护）；曝光上限已由 BASE 收口到 18，本值仅作半精度绝对后备（KEY / 此值 = 720）
 const int EXPOSURE_SAMPLE_COUNT = 16;              // 测光采样数：槽位 fragment 的测光成本与分辨率解耦（全遍历在 4K 下 2000+ fetch）
 // 均匀随机采样核：4×4 抖动网格（每单元一个随机点），全域覆盖、无聚集，读取端映射回 tile4；固定核保证帧间稳定
 const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
@@ -115,7 +128,7 @@ const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
     vec2(0.219, 0.766), vec2(0.473, 0.824), vec2(0.742, 0.779), vec2(0.951, 0.898)
 );
 
-// ---- TAA（lib/common/utils/jitter.glsl + lib/post/taa.glsl）----
+// ---- TAA（lib/common/utils/noise.glsl + lib/post/taa.glsl）----
 const float TAA_JITTER_SCALE = 1.0;  // jitter 幅度缩放（1.0 = 满幅 ±0.5 px，即 1 px 跨度；降低可换锐度）
 // Halton(2,3) 16 相位序列，像素域 [-0.5, 0.5]（春雷同表）；查表纯 GLSL 实现，不依赖 properties 自定义 uniform（旧版 OptiFine 兼容）
 const vec2 TAA_JITTER_SAMPLES[16] = vec2[16](
@@ -157,11 +170,22 @@ const float TIME_NIGHT_RAMP = 40.0; // 月亮直射门斜率（春v2 NIGHT_DURAT
 // 直射 = albedo/π × (noon×SOLAR_IRRADIANCE + night×MOON_IRRADIANCE) × solarTransmittance(表面点 -> 光源) × NdotL × 阴影可见性；
 // 大气顶辐照度直接复用大气常量（与天空 LUT 同源——sky:direct 亮度比物理一致，绝对量级随 SKY_BRIGHTNESS 与天空一起统调）；
 // 环境光 / 方块光同为辐照度形式，与直射共用同一个 albedo/π
-const float SKY_AMBIENT_BRIGHTNESS = 5.3; // 天空环境辐照度 = LUT 天顶色 × 本系数（fullscreen_vsh 的 vSkyAmbient 主路径）：天顶辐射率 → 半球环境辐照度换算 ≈ π × 1.7（π × 余弦加权天光平均 / 天顶的正午比值，含 MS），初值校准使正午幅度与旧 DAY_SKY_AMBIENT（luma ~9.0）一致——月夜同链缩放（月亮辐照度比 5e-4）恰近旧 NIGHT_SKY_AMBIENT；色调 / 幅度均取自天顶结果、昼夜 / 曙暮光 / 海拔自动跟进，进游戏统调天光亮度的主旋钮
+const float SKY_AMBIENT_BRIGHTNESS = 2.5; // 天空环境辐照度 = LUT 天顶色 × 本系数（fullscreen_vsh 的 vSkyAmbient 主路径）：天顶辐射率 → 半球环境辐照度换算 ≈ π × 1.7（π × 余弦加权天光平均 / 天顶的正午比值，含 MS），初值校准使正午幅度与旧 DAY_SKY_AMBIENT（luma ~9.0）一致——月夜同链缩放（月亮辐照度比 5e-4）恰近旧 NIGHT_SKY_AMBIENT；色调 / 幅度均取自天顶结果、昼夜 / 曙暮光 / 海拔自动跟进，进游戏统调天光亮度的主旋钮
 const vec3 DAY_SKY_AMBIENT   = vec3(6.4, 8.9, 17.6);        // 白天天空环境辐照度回退值 ≈ π × 余弦加权天光平均辐射（由 sky LUT 正午量级推得：天顶 lum ~1.5 / 地平线 ~13；多次散射接入后按正午辐照度增幅 ×1.069/×1.116/×1.260 重定——见 SKY_MS_STRENGTH 注释）；vSkyAmbient 主路径已改为 LUT 天顶色 × SKY_AMBIENT_BRIGHTNESS（fullscreen_vsh.glsl），本常量仅在 LUT 无效的回退路径（vSkyAmbient 回退 / sky.glsl fallbackSkyColor）生效
 const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4;    // 夜晚回退值 = 月亮辐照度比（与 MOON_IRRADIANCE 同源，春雷 1/2000）；正常路径下天顶色随月亮辐照度同链缩放，夜晚过暗只抬 MOON_IRRADIANCE 单旋钮
 const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20) * PI; // 方块光辐照度（π × 旧 albedo 直乘时代的量级，行为不变）
 const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底（gameplay 地板，刻意低于物理夜天光），避免纯黑不可见
+
+// ---- 次表面散射（SSS，lib/lighting/lighting.glsl + shadow.glsl，春v2 deferred5 同构）----
+// 薄叶透光近似（春v2 注引「练习项目(十一)」的 wrap 漫反射）：归一化强度 [0,1] 分别线性缩放两处——
+// cosTheta wrap 重映射量（cos = saturate((ndl + w)/(1 + w))，把明暗界拓宽到背光侧——植被整株近均匀
+// 受光、明暗只由阴影贴图区分）与阴影 PCF 软化半径（tap 越出叶片自身的阴影边界，背光薄叶部分漏光、
+// 阴影边变软），同一强度驱动、两处 _MAX 为档位锚点而非独立旋钮；材料强度来源 colortex4 albedo a
+// 通道物品标记（gbuffer_data.glsl 的 materialSSSStrength，植被取 VEGETATION_SSS_STRENGTH 硬编码、
+// 252~255 显式标记接入时按材质定 0~1）
+const float VEGETATION_SSS_STRENGTH = 0.5;  // 植被 SSS 强度 [0,1]，唯一调效旋钮（0 = 关闭、重映射退化为 max(ndl, 0)；1 = 全档）；默认 0.5 → 有效 wrap = SSS_WRAP_MAX × 0.5
+const float SSS_WRAP_MAX            = 2.0;  // 强度 1.0 全档的 wrap 量：ndl = 0 → 2/3 ≈ 0.67、ndl = -0.5 → 0.5（默认 0.5 档再减半——温和背光辉光，春v2 plants 的 20 为近全透光档、明暗界几乎消失，故取保守量级）
+const float SSS_SOFT_RADIUS_MAX     = 1.0;  // 强度 1.0 全档的阴影软化半径（texel；默认 0.5 档 → 0.5 texel）——过大会沿墙缘漏光，进游戏按需微调
 
 // ---- 阴影（program/shadow.glsl 写入端 + lib/lighting/shadow.glsl 采样端）----
 // 引擎指令前五条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0）由 OptiFine/Iris 扫描
@@ -174,7 +198,24 @@ const bool  shadowHardwareFiltering0 = true;   // 仅 shadowtex0 开硬件深度
                                               // 未来 PCSS blocker search 共用的后路（春v2 同布置，引擎配置零改动可升级）
 const float SHADOW_DISTORT_FACTOR = 0.85;  // 线性扭曲强度（春v2/BSL/Kappa 同族）：中心 factor = 1-此值 = 0.15、纹素密度放大约 6.7 倍，边缘 factor = 1 不缩放
 const float SHADOW_DEPTH_SCALE    = 0.2;   // shadow clip z 压缩（BSL/Photon/Kappa 同值）：写读两侧对称，配合常数 bias 抑制痤疮
-const int   SHADOW_PCF_SAMPLES    = 4;     // 黄金螺旋 tap 数（硬件比较自带 2×2 双线性，等效 32 次深度比较；IGN 时域旋转 + TAA 累积收敛）
+const int   SHADOW_PCF_SAMPLES    = 12;    // 黄金螺旋 tap 数（硬件比较自带 2×2 双线性，等效 48 次深度比较；temporal bayer 时域旋转 + TAA 累积收敛）
+// 黄金螺旋基准方向 (cos(i·GA), sin(i·GA))：采样端把盘旋转的 sincos 外提为每像素一对后，逐 tap
+// 只剩 mat2 旋转乘查表（lib/lighting/shadow.glsl）——角度恒等 theta_i = i·GA + φ 与原
+// (i+noise)·GA + rotation 逐位相同。以 SHADOW_PCF_SAMPLES 定长，改 tap 数须同步本表条目
+const vec2 SHADOW_PCF_DIRS[SHADOW_PCF_SAMPLES] = vec2[SHADOW_PCF_SAMPLES](
+    vec2( 1.000000000,  0.000000000),
+    vec2(-0.737368878,  0.675490294),
+    vec2( 0.087425725, -0.996171041),
+    vec2( 0.608438860,  0.793600752),
+    vec2(-0.984713485, -0.174181950),
+    vec2( 0.843755295, -0.536728053),
+    vec2(-0.259604305,  0.965715074),
+    vec2(-0.460907025, -0.887448429),
+    vec2( 0.939321296,  0.343038631),
+    vec2(-0.924345556,  0.381556408),
+    vec2( 0.423845995, -0.905734273),
+    vec2( 0.299283864,  0.954164120)
+);
 const float SHADOW_RADIUS_BASE    = 0.25;   // 基础软半径（texel）
 const float SHADOW_RADIUS_DIST    = 2.0;   // 随相机距离增长的半径上限（texel）
 const float SHADOW_BIAS_NORMAL    = 0.05;  // normal offset 基数（世界单位，随距离 / 坡度放大，春v2 同思路）

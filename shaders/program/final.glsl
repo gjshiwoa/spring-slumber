@@ -19,7 +19,7 @@
 #include "/lib/post/tonemap.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/lib/common/utils/space.glsl"
-#include "/lib/common/utils/jitter.glsl"
+#include "/lib/common/utils/noise.glsl"
 #include "/program/fullscreen_vsh.glsl"
 
 // ================================ FRAGMENT ================================

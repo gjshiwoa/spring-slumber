@@ -24,7 +24,7 @@ uniform float viewHeight; // 视口高度（像素）；同上
 uniform float frameTime;  // 帧间隔（秒）；自动曝光时间适应
 uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 15）与首帧守卫
 
-// ---- TAA 重投影（lib/common/utils/jitter.glsl + lib/post/taa.glsl + utils/space.glsl 上一帧换算）----
+// ---- TAA 重投影（lib/common/utils/noise.glsl + lib/post/taa.glsl + utils/space.glsl 上一帧换算）----
 uniform vec3 cameraPosition;         // 本帧相机世界坐标
 uniform vec3 previousCameraPosition; // 上帧相机世界坐标
 uniform mat4 gbufferProjectionInverse;  // 裁剪 -> 视图（当前帧）：TAA 深度重建

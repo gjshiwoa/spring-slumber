@@ -19,7 +19,8 @@
 // 几何光照：读 colortex4（albedo + 高光）、colortex5（观察空间法线 + 原始 lmcoord，重映射见
 // pipeline/gbuffer_data.glsl remapLightmap）、去抖 uv + depthtex1 原始深度重建观察空间位置后经
 // lib/lighting/lighting.glsl 的 shadeSurface 着色（直接光 = shadowtex 阴影可见性 × 相机高度近似的大气透射率
-// × 直射辐照度；透射率与光源方向 / 时间 / 颜色基色均由 vsh 帧数据提供，见 lib/lighting/shadow.glsl）
+// × 直射辐照度；透射率与光源方向 / 时间 / 颜色基色均由 vsh 帧数据提供，见 lib/lighting/shadow.glsl；
+// albedo a 通道植被标记经 materialSSSStrength 转为 SSS 强度——cosTheta wrap 重映射 + 阴影软化，春v2 同构）
 
 #define FULLSCREEN_DIRECT_TRANSMITTANCE
 
@@ -30,7 +31,6 @@
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
-#include "/lib/common/utils/jitter.glsl"
 #include "/lib/common/utils/filters.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
@@ -82,15 +82,27 @@ void main() {
         color = getSkyColor(screenToView(vec3(uv, 1.0)),
                             vSunDirection, vMoonDirection, vHorizon, vSkyLutValid > 0.5);
     } else {
-        // 几何光照：colortex4.rg 解包 albedo（sRGB，反 gamma），colortex5.rg 八面体观察空间法线、
-        // .ba 原始 lmcoord 重映射；viewPos = 去抖 uv + 本像素原始深度
+        // 几何光照：colortex4.rg 解包 albedo（sRGB，反 gamma；a 通道为物品标记位——植被 =
+        // terrain gsh 程序化判定，经 materialSSSStrength 消费为 SSS 强度），colortex5.rg 八面体
+        // 观察空间法线、.ba 原始 lmcoord 重映射；viewPos = 去抖 uv + 本像素原始深度
         vec4 gAlbedoSpec = texelFetch(colortex4, pixel, 0);
         vec4 gNormalLm = texelFetch(colortex5, pixel, 0);
-        vec3 albedo = srgbToLinear(unpack2x16To4x8(gAlbedoSpec.rg).rgb);
+        vec4 gAlbedo = unpack2x16To4x8(gAlbedoSpec.rg);
+        vec3 albedo = srgbToLinear(gAlbedo.rgb);
+        float sssStrength = materialSSSStrength(gAlbedo.a);
         vec3 normalView = decodeOctahedral(gNormalLm.rg);
         vec2 lm = remapLightmap(gNormalLm.ba);
         vec3 viewPos = screenToView(vec3(uv, depth));
-        color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance);
+        color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance, sssStrength);
+
+        // ---- 调试：植被标记可视化（验证 gsh 程序化判定；块注释停用，恢复时去掉 /* 与 */ 两行）----
+        // 命中植被时整像素覆盖为红（标记为 8bit 精确往返（251/255 → 251 → 251/255），
+        // 半 8bit 容差比较防边缘抖动）
+        /*
+        if (sssStrength > 0.0) {
+            color = vec3(1.0, 0.0, 0.0);
+        }
+        */
     }
     outColor = vec4(color, 1.0);
 }
