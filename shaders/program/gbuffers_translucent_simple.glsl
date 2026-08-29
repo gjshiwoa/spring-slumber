@@ -23,6 +23,9 @@ VARYING vec4 vColor;
 layout(location = 0) out vec4 outColor;
 
 void main() {
+    // TAAU 子区域外片元剔除（机制见 noise.glsl 的 outsideRenderRegion；半透明混合本无 Early-Z 顾虑）
+    if (outsideRenderRegion()) discard;
+
     vec4 color = texture(tex, vTexCoord) * vColor;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
 

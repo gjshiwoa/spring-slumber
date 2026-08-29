@@ -30,20 +30,21 @@ layout(location = 1) out vec4 outDetail;  // colortex5
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
 
-    // 位置屏幕导数先于 discard 求好（同 gbuffers_opaque 的顺序约束：quad 内被提前终止的
-    // 透明 texel 会使幸存像素的 dFdx/dFdy 拿到未定义值）；cross / normalize 推迟到核心分支，
-    // 外壳分支不做这部分工作
+    // 位置屏幕导数先于 discard 求好（同 gbuffers_opaque 的顺序约束）；cross / normalize
+    // 推迟到核心分支，外壳分支不做这部分工作
     vec3 dp1 = dFdx(vViewPos);
     vec3 dp2 = dFdy(vViewPos);
 
+    // TAAU 子区域外片元剔除（纪律见 noise.glsl；beacon 光柱为全高几何、跨视锥边界的三角形最多，
+    // 本程序已有 cutout discard、Early-Z 无额外损失）
+    if (outsideRenderRegion()) discard;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
 
     vec4 previousMaterial = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);
 
     if (color.a < ALPHA_BEACON_CORE) {
         // 半透明外壳：手动合成进打包 albedo，背景 specular / 法线 / lm 原样写回
-        //（合成为 texcolor 的半透明混合、只作用于 rgb——物品标记不参与混合，a 通道整像素置空，
-        // 同像素背景的标记随重打包一并抹去，混合像素的标记本就无效）
+        //（合成只作用 rgb——标记 a 通道整像素置空，同像素背景标记随重打包一并抹去）
         vec3 previousColor = unpack2x16To4x8(previousMaterial.rg).rgb;
         color.rgb = mix(previousColor, color.rgb, color.a);
         outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), previousMaterial.ba);

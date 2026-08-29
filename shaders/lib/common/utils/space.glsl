@@ -1,18 +1,16 @@
 // 坐标空间构造工具（对应春雷 utils/space.glsl 的 TBN 部分）
-// TBN 部分仅片段阶段可用（dFdx / dFdy）；坐标换算函数任意阶段可用
-// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/common/globals/uniforms.glsl
-//（gbufferProjectionInverse / gbufferModelViewInverse / previous 系矩阵与 cameraPosition 系——坐标换算函数所需；
-//   阴影换算另需 shadowProjection / shadowModelView）、lib/common/globals/constants.glsl（阴影扭曲 / 压缩
-//   常量——仅阴影换算部分需要）
+// TBN 部分仅片段阶段可用（dFdx / dFdy）；坐标换算任意阶段可用
+// 依赖由接入的 program 先行 include（lib 文件不嵌套）：uniforms.glsl（投影 / 视图矩阵，
+//   含 previous 系与 cameraPosition 系；阴影换算另需 shadowProjection / shadowModelView）、
+//   constants.glsl（阴影扭曲 / 压缩常量——仅阴影换算部分需要）
 #ifndef LIB_SPACE_GLSL
 #define LIB_SPACE_GLSL
 
 // ---------------- 坐标换算（任意阶段） ----------------
 
 // 屏幕空间 [0,1] -> 观察空间位置：xy = uv、z = 深度缓冲原始值，*2-1 转 NDC 与透视除法都在
-// 函数内完成——调用端不再手工转换（曾因只转 xy 漏转 depth 致重建位置沿视线偏移、阴影错位）；
-// z 取 1 时结果落在远平面上（天空视线重建）
-// 通用管线换算：TAA 深度重建（taa.glsl）、deferred_init 天空视线 / 几何 viewPos 共用
+// 函数内完成（杜绝只转 xy 漏转 depth 的重建错位）；z 取 1 时落在远平面（天空视线）。
+// TAA 深度重建与 deferred_init 天空视线 / 几何 viewPos 共用
 vec3 screenToView(vec3 screenPos) {
     vec4 viewPos = gbufferProjectionInverse * vec4(screenPos * 2.0 - 1.0, 1.0);
     return viewPos.xyz / viewPos.w;
@@ -31,7 +29,7 @@ vec3 viewToRelativeWorld(vec3 viewPos) {
 }
 
 // 相对世界空间 -> 上一帧屏幕 uv（重投影链第二段）：cameraDelta 为当帧 -> 上帧相机位移，
-// 一般传 cameraPosition - previousCameraPosition，手部等随相机运动几何传 vec3(0.0) 清零平移；
+// 一般传 cameraPosition - previousCameraPosition，手部等随相机几何传 vec3(0.0) 清零平移；
 // 返回无抖动坐标，与 jitter 的衔接由调用方处理
 vec2 relativeWorldToPreviousScreen(vec3 relativeWorldPos, vec3 cameraDelta) {
     vec4 prevClip = gbufferPreviousProjection * gbufferPreviousModelView
@@ -39,8 +37,8 @@ vec2 relativeWorldToPreviousScreen(vec3 relativeWorldPos, vec3 cameraDelta) {
     return prevClip.xy / prevClip.w * 0.5 + 0.5;
 }
 
-// 观察空间方向 -> 上一帧屏幕 uv：无穷远几何（天空）重投影——w = 0 平移自动失效、
-// 仅相机旋转生效（天空挂在视线方向上、与相机平移无关）；输入不要求归一化（uv 对长度不变）
+// 观察空间方向 -> 上一帧屏幕 uv：无穷远几何（天空）重投影——w = 0 平移自动失效、仅相机旋转
+// 生效；输入不要求归一化
 vec2 viewDirectionToPreviousScreen(vec3 dirView) {
     vec4 prevClip = gbufferPreviousProjection * gbufferPreviousModelView
                   * vec4(viewToWorldDirection(dirView), 0.0);
@@ -60,9 +58,9 @@ vec2 shadowDistort(vec2 ndcXY) {
     return ndcXY / shadowDistortFactor(ndcXY);
 }
 
-// 相对世界空间 -> shadow 屏幕 [0,1]：xy 扭曲、z 压缩——与 program/shadow.glsl 写侧
-// gl_Position 的逐字符对称（读取端比写侧多一步 NDC -> [0,1] 映射）；
-// distortFactor 输出未扭曲 NDC 处的局部放大补偿（PCF 半径 / 未来 blocker search 用）
+// 相对世界空间 -> shadow 屏幕 [0,1]：xy 扭曲、z 压缩——与 program/shadow.glsl 写侧逐字符对称
+//（读取端比写侧多一步 NDC -> [0,1] 映射）；distortFactor 输出未扭曲 NDC 处的局部放大补偿
+//（PCF 半径 / 未来 blocker search 用）
 vec3 relativeWorldToShadowScreen(vec3 relativeWorldPos, out float distortFactor) {
     vec4 clipPos = shadowProjection * shadowModelView * vec4(relativeWorldPos, 1.0);
     vec3 ndcPos = clipPos.xyz; // 正交 w = 1
@@ -85,10 +83,9 @@ vec3 calculateGeomNormal(vec3 viewPos) {
     return geomNormalFromDerivatives(dFdx(viewPos), dFdy(viewPos));
 }
 
-// cotangent frame：由观察空间位置与 UV 的屏幕导数构造 TBN（春雷 / 春v2 同款）
-// 导数由调用方先于 discard 集中求好传入（discard 后 quad 内幸存像素的导数未定义），
-// TBN 构造与后续法线采样得以推迟到 discard 之后；任意贴图向量经 mat3(T, B, N) 左乘后
-// 即观察空间向量；无 UV 变化的平面自动退化
+// cotangent frame：由观察空间位置与 UV 的屏幕导数构造 TBN（春雷 / 春v2 同款）。导数由调用方
+// 先于 discard 集中求好传入（discard 后 quad 内幸存像素的导数未定义），TBN 构造与后续法线
+// 采样得以推迟到 discard 之后；任意贴图向量经 mat3(T, B, N) 左乘即观察空间向量
 mat3 calculateTBN(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2) {
     vec3 n = geomNormalFromDerivatives(dp1, dp2);
 

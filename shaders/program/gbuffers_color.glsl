@@ -19,6 +19,10 @@ VARYING vec4 vColor;
 layout(location = 0) out vec4 outMaterial; // colortex4
 
 void main() {
+    // TAAU 子区域外片元剔除（机制见 noise.glsl 的 outsideRenderRegion；手动合成的读回 /
+    // 写回一并省去——选框线等线条几何常跨越视锥边界，且半透明类无 Early-Z 顾虑）
+    if (outsideRenderRegion()) discard;
+
     // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）；
     // 合成只作用于 rgb——物品标记不参与混合，a 通道整像素置空
     vec4 previous = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);

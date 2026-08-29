@@ -1,11 +1,13 @@
 // 不透明 gbuffer: gbuffers_opaque
 // 不透明阶段，MRT 写两张（colortex0/1 不写，颜色由 deferred_init 解包 colortex4 后写出）：
 //   colortex4 = rg 打包 albedo（tex × 顶点色，4x8→2x16；a 通道在 cutout 判定后复用为物品标记
-//               MATERIAL_*，terrain 入口由下方 gsh 段程序化判定植被），ba 打包高光贴图 RGBA（4x8→2x16）
+//               MATERIAL_*——vsh 先写 block.properties 显式标记（草方块 → MATERIAL_SOLID 排除），
+//               terrain 入口空标记时由下方 gsh 段程序化判定植被），ba 打包高光贴图 RGBA（4x8→2x16）
 //   colortex5 = rg 八面体观察空间法线（贴图法线经导数 TBN 变换，无 normals 纹理时为几何法线），ba 原始 lmcoord（读取端再重映射）
 // albedo 存原始 sRGB（8bit 打包），反 gamma 由 deferred_init 侧统一处理；block / hand 入口复用本程序
 // 植被判定为 terrain 入口专属的几何着色器（STAGE_GEOMETRY 段，春雷 isLikelyPlantTriangle 判据），
-// 按 per-triangle 分类经 flat varying 下传；block / hand 入口无 gsh、标记恒空
+// 按 per-triangle 分类经 flat varying 下传、仅在 vsh 空标记时兜底（显式标记来源见 vsh 的 mc_Entity）；
+// block / hand 入口无 gsh、mc_Entity 亦无引擎填充，标记恒空
 // fsh 前半 / vsh 后半（+ 可选 gsh 段），入口文件用 STAGE_FRAGMENT / STAGE_VERTEX / STAGE_GEOMETRY 选择编译哪一段
 
 #include "/lib/common/globals/constants.glsl"
@@ -32,7 +34,7 @@ VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
 VARYING vec2 vLmcoord;
 VARYING vec3 vViewPos;
-flat VARYING float vMaterialID; // 物品标记：terrain 由 gsh 程序化判定，其余入口 vsh 置 MATERIAL_NONE
+flat VARYING float vMaterialID; // 物品标记：vsh 写 block.properties 显式标记（或空），terrain 空标记时由 gsh 程序化补判、其余入口恒空
 #endif
 
 // ================================ FRAGMENT ================================
@@ -46,19 +48,19 @@ layout(location = 1) out vec4 outDetail;  // colortex5
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
 
-    // 导数计算必须先于 discard：规范允许实现在 discard 后任意时刻终止调用，quad 内被终止的
-    // 透明 texel 寄存器值未定义、幸存像素的 dFdx/dFdy（及隐式 LOD）会拿到垃圾——cutout
-    // （草 / 树叶）边缘法线错乱、直射光描边的根源；先集中求好再过 discard，
-    // TBN 构造与 normals 采样推迟到后面，被剔除的透明 texel 免去这部分开销
+    // 导数必须先于 discard：规范允许实现在 discard 后任意终止调用，quad 内被终止 texel 的寄存器
+    // 值未定义、幸存像素的 dFdx/dFdy（及隐式 LOD）会拿到垃圾（cutout 边缘法线错乱的根源）；
+    // 先集中求好再过 discard，TBN 构造与 normals 采样推迟到后面
     vec3 dp1 = dFdx(vViewPos);
     vec3 dp2 = dFdy(vViewPos);
     vec2 duv1 = dFdx(vTexCoord);
     vec2 duv2 = dFdy(vTexCoord);
 
+    // TAAU 子区域外片元剔除（纯性能剔除，纪律见 noise.glsl；本程序已有 cutout discard、Early-Z 无额外损失）
+    if (outsideRenderRegion()) discard;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴（树叶等）
 
-    // alpha 的 cutout 职责已尽，albedo 的 a 通道槽位改存物品标记（植被 = gsh 程序化判定；
-    // block / hand 入口无 gsh、恒为 MATERIAL_NONE），随 pack4x8To2x16 一同压缩进 colortex4.rg
+    // alpha 的 cutout 职责已尽，a 通道槽位改存物品标记（随 pack4x8To2x16 一同压缩进 colortex4.rg）
     color.a = vMaterialID;
 
     // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
@@ -77,13 +79,12 @@ void main() {
 
 // ================================ GEOMETRY ================================
 #ifdef STAGE_GEOMETRY
-// 植被程序化判定（仅 terrain 入口挂接：world0/gbuffers_terrain.gsh；block / hand 入口无本段、
-// 标记走 vsh 的空值）。春雷 passes/06_gbuffers/terrain.glsl 的 isLikelyPlantTriangle 判据，两个
-// 几何 / 染色信号取或——纯程序化、不依赖 block.properties：
+// 植被程序化判定（仅 terrain 入口挂接）。春雷 isLikelyPlantTriangle 判据，两信号取或——
+// 染色信号对草方块顶面等染色几何误报，由 vsh 的 block.properties 显式标记压制：
 //   垂直交叉面片：三角形几何法线近水平（面片垂直地面）且 xz 分量对角——原版草 / 花 / 苗的
-//     十字交叉模型两两正交再整体斜置 45°，法线落在对角方向；轴对齐墙面 / 门板对角度不足
-//   生物群系染色：三顶点平均顶点色 chroma 偏大——草 / 树叶等顶点色带绿色 tint，未染色几何近灰
-// 按三角形整体分类、经 flat varying 下传，fsh 写入 albedo a 通道（colortex4.rg 打包位）
+//     十字交叉模型两两正交再整体斜置 45°，法线落在对角方向
+//   生物群系染色：三顶点平均顶点色 chroma 偏大——草 / 树叶带绿色 tint，未染色几何近灰
+// 按三角形整体分类、经 flat varying 下传，fsh 写入 albedo a 通道
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 3) out;
 
@@ -123,8 +124,7 @@ bool isLikelyPlantTriangle() {
 }
 
 void main() {
-    // vsh 置空、gsh 程序化补判；显式标记扩展点——未来 vsh 经 mc_Entity / block.properties 写入
-    // 显式标记时，此处仅在空标记时兜底（春雷 primitiveMarker 同构）
+    // vsh 经 mc_Entity / block.properties 写入显式标记、gsh 仅空标记时程序化兜底（春雷同构）
     float primitiveMarker = vGshMaterialID[0];
     if (primitiveMarker < 0.5 && isLikelyPlantTriangle()) {
         primitiveMarker = MATERIAL_VEGETATION;
@@ -147,13 +147,19 @@ void main() {
 // ================================= VERTEX =================================
 #ifdef STAGE_VERTEX
 
+// block.properties 自定义方块 ID（x 分量，未定义方块 = -1；y 为渲染类型）：仅 terrain 等地形类入口
+// 有引擎填充，block / hand 入口未绑定、取默认 0——不命中任何 BLOCK_* 常量，标记回落 MATERIAL_NONE
+in vec2 mc_Entity;
+
 void main() {
     gl_Position = applyTAAJitter(ftransform()); // TAA 亚像素抖动，composite_taa 统一解析
     vViewPos = (gl_ModelViewMatrix * gl_Vertex).xyz;
     vTexCoord = gl_MultiTexCoord0.xy;
     vColor = gl_Color;
     vLmcoord = (gl_TextureMatrix[1] * gl_MultiTexCoord1).xy;
-    vMaterialID = MATERIAL_NONE; // 无显式标记来源（block.properties 为扩展点）；terrain 入口由 gsh 程序化补判
+    // 显式标记（block.properties）：草方块顶面带生物群系染色、会被 gsh 的 chroma 判据误标——
+    // 在此显式置 MATERIAL_SOLID，gsh 见非空标记不再兜底（读取端 SSS 强度取 0）
+    vMaterialID = mc_Entity.x == BLOCK_GRASS_BLOCK ? MATERIAL_SOLID : MATERIAL_NONE;
 }
 
 #endif

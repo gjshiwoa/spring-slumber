@@ -16,10 +16,9 @@ vec3 textureNice(sampler2D src, vec2 uv) {
     return texture(src, uv).rgb;
 }
 
-// 4-tap 对角 tent 上采样核（下采样 13-tap 核的上采样对位工具）：
-// center 处 4 个对角双线性 tap（±tapStep），平均后有效覆盖 ≈3×3 源纹素的平滑邻域——
-// 逐级 2 倍上采样无伪影，大倍率放大不再出现单双线性的菱形网格；
-// center / tapStep 为源纹理归一化坐标，clampRect 同 downsample13Tap（tap 越界钳回边缘）
+// 4-tap 对角 tent 上采样核（下采样 13-tap 核的上采样对位工具）：center 处 4 个对角双线性 tap
+// 平均——逐级 2 倍上采样无伪影、大倍率放大不出现菱形网格；center / tapStep 为源纹理归一化坐标，
+// clampRect 同 downsample13Tap（tap 越界钳回边缘）
 vec3 tentFilter4(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {
     vec3 result = vec3(0.0);
     result += texture(src, clamp(center + tapStep * vec2(-1.0, -1.0), clampRect.xy, clampRect.zw)).rgb;
@@ -55,10 +54,9 @@ vec3 downsample13Tap(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {
     return result;
 }
 
-// 5-tap 锐化 Catmull-Rom 重采样（春v2 lib/camera/filter.glsl 的 catmullRom5 同款，SMAA 型锐化参数）：
-// 4 角 + 十字中心共 5 次显式 Lod0 双线性 tap（Jimenez 快速重采样，把 4×4 双三次压成 5 tap），
-// 返回 rgba 全通道重采样结果（TAA 历史：rgb = 颜色、a = 上帧深度随同一组权重一趟带回，免独立采样）；
-// sharpenAmount 为锐化强度（0 = 标准 Catmull-Rom，1 = 最锐；春雷 0.6 / 春v2 低配版 0.8），
+// 5-tap 锐化 Catmull-Rom 重采样（春v2 同款，Jimenez 快速重采样把 4×4 双三次压成 5 tap）：
+// 4 角 + 十字中心共 5 次显式 Lod0 双线性 tap，返回 rgba 全通道（TAA 历史：a = 上帧深度随同一组
+// 权重一趟带回，免独立采样）；sharpenAmount 为锐化强度（0 = 标准 Catmull-Rom，1 = 最锐），
 // texSize 显式传入，函数保持无依赖
 vec4 catmullRom5(sampler2D src, vec2 uv, vec2 texSize, float sharpenAmount) {
     vec2 position = uv * texSize;

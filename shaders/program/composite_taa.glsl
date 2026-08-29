@@ -1,14 +1,13 @@
-// TAA 解析 pass: composite_taa（world0/composite3 入口）
-// vsh = 通用全屏 vsh（program/fullscreen_vsh.glsl——vTexCoord / vJitter / vExposure
-// 等帧数据 varying 的来源，本 program 无自定义 vsh 段）；fsh 按需声明同名 in
-// 位于全部 gbuffers（含 deferred 之后的前向半透明）之后、bloom 链（composite4~8）之前：
-// 读抖动后的线性 colortex0（几何 vsh 抖动 + 天空 deferred_init 亚像素求值）与 depthtex0，
-// 重投影采 colortex3 历史（天空锚点走无穷远方向仅旋转链），方差钳制 + 置信度混合后写回
-// colortex0，并把混合色 + 本帧最近片元线性深度（天空像素为哨兵）写进 colortex3 供下帧
-//（DRAWBUFFERS:03 单程序独占 ping-pong，不依赖 flip.*）；bloom 图集与自动曝光测光自此吃抗锯齿后的稳定图像
-// 钳制域曝光归一化（春雷同思路）：本帧曝光要到上采样链末级（composite12）才写入，这里读
-// colortex7 曝光槽位拿到的恰是上一帧的适应值——工作域乘它把暗景拉进 tonemap 压缩段、σ 远离
-// epsilon 地板（低亮度钳制失效会拖影），vsh 取一次经 varying 传入，结果除回后存储（历史仍为未曝光线性值）
+// TAA 解析 pass: composite_taa（composite3 入口；vsh = 通用全屏 vsh，本 program 无自定义 vsh 段，
+// fsh 按需声明同名 in）。位于全部 gbuffers（含 deferred 后的前向半透明）之后、bloom 链之前：
+// 读抖动后的线性 colortex0 与 depthtex0，重投影采 colortex3 历史、方差钳制 + 置信度混合后写回
+// colortex0（TAAU 时为上采样后的全屏目标分辨率，机制见 lib/post/taa.glsl），混合色 + 本帧锚点
+// 线性深度写 colortex3 供下帧（DRAWBUFFERS:03 单程序独占 ping-pong，不依赖 flip.*）；bloom 图集
+// 与自动曝光测光自此吃抗锯齿后的稳定图像。TAAU 下 quad 保持全屏——本 pass 是上采样器，与缩进
+// 子区域的 deferred_init（FULLSCREEN_RENDER_REGION）分工
+// 曝光归一化：本帧曝光要到 composite12 才写入，这里读 colortex7 槽位拿到的是上一帧适应值——
+// 工作域乘它把暗景拉进 tonemap 压缩段、σ 远离 epsilon 地板（见 taa.glsl 头注释），vsh 取一次
+// 经 varying 传入，结果除回后存储（历史仍为未曝光线性值）
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/globals/uniforms.glsl"

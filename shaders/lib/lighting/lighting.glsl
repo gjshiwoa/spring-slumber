@@ -1,22 +1,15 @@
-// 表面光照（线性空间，直接光物理化——春雷 shading.glsl 同构）
-// 全部光项以辐照度（与大气同量级）汇总，最后统一乘 Lambert BRDF = albedo/π：
-//   直射 E = vDirectIrradiance（通用全屏 vsh 算好的大气顶辐照度——统一时间系统太阳 / 月亮门控
-//           加权和，主光源切换处为黑过渡 + 雨天衰减）
-//           × directTransmittance（调用方显式传入；deferred_init 以玩家 / 相机高度近似，
-//           在全屏 vsh 中计算一次并经 varying 复用）
-//   天空环境光 / 方块光为辐照度形式（constants.glsl 定量）；环境基色 = 天顶大气结果 ×
-//   SKY_AMBIENT_BRIGHTNESS（vsh 探针 rgb，与渲染天空同源——色调 / 幅度一并物理自适应），
-//   雨天去饱和已在 vsh 帧数据预并入（与逐像素标量乘法可交换）
-// 阴影贴图超距 / 出屏按全亮（sampleShadowVisibility 返回 1，无回退门控）；晨昏主光源切换的阴影
-// 跳变由 vDirectIrradiance 同窗淡黑吸收（辐照度乘 0，任何可见性值都不可见）
-// 帧数据取用（春v2 模式——lib 函数直接读 program 声明的同名 in varying 全局）：
-//   vLightDirection / vDirectIrradiance / vSkyAmbient——由通用全屏 vsh
-//   （program/fullscreen_vsh.glsl）输出，接入方 fsh 须在本文件 include 之前
-//   声明同名 in（未来前向 program 如 water 共享本函数时，由其 vsh 输出同名 varying）
-// 仅片段阶段（函数体引用阴影采样）；依赖由接入的 program 先行 include（lib 文件不嵌套 include）：
-//   lib/common/globals/uniforms.glsl、lib/common/globals/constants.glsl（光照 / 阴影常量、PI）、
-//   lib/common/utils/space.glsl（viewToWorldDirection / viewToRelativeWorld）、
-//   lib/lighting/shadow.glsl（sampleShadowVisibility）
+// 表面光照（线性空间，直接光物理化——春雷 shading.glsl 同构）：全部光项以辐照度汇总、末尾统一乘
+// Lambert BRDF = albedo/π：
+//   直射 E = vDirectIrradiance（vsh 帧数据：统一时间系统门控加权和 + 雨天衰减）× directTransmittance
+//           （调用方传入；deferred_init 以相机高度近似、vsh 中算一次经 varying 复用）
+//   天空环境光 / 方块光为辐照度形式（定量见 constants.glsl）；环境基色 = LUT 天顶色 ×
+//   SKY_AMBIENT_BRIGHTNESS（vsh 探针，与渲染天空同源），雨天去饱和已在 vsh 预并入
+// 阴影超距 / 出屏按全亮；晨昏主光源切换的阴影跳变由 vDirectIrradiance 同窗淡黑吸收
+// 帧数据取用（春v2 模式——lib 函数直接读 program 声明的同名 in 全局）：vLightDirection /
+//   vDirectIrradiance / vSkyAmbient 由通用全屏 vsh 输出，接入方 fsh 须在本文件 include 之前声明
+//   同名 in（未来前向 program 如 water 共享本函数时，由其 vsh 输出同名 varying）
+// 仅片段阶段；依赖由接入的 program 先行 include：uniforms.glsl / constants.glsl（含 PI）/
+//   utils/space.glsl（viewToWorldDirection / viewToRelativeWorld）/ lighting/shadow.glsl
 #ifndef LIB_LIGHTING_GLSL
 #define LIB_LIGHTING_GLSL
 
@@ -42,17 +35,14 @@ vec3 shadeSurface(vec3 albedo, vec3 normalView, vec2 lm, vec3 viewPos, vec3 dire
     vec3 relativeWorldPos = viewToRelativeWorld(viewPos);
     float distWorld = length(relativeWorldPos);
 
-    // 直射余弦的 SSS wrap 重映射（春v2 deferred5 同式）：cos = saturate((ndl + w) / (1 + w))，
-    // w = SSS_WRAP_MAX × 强度——把明暗界拓宽到背光侧，薄叶透光使整株近均匀受光、明暗只由阴影贴图
-    // 区分；同一强度线性缩放阴影软化半径（sampleShadowVisibility），w = 0 时退化为 max(ndl, 0)、
-    // 非 SSS 表面行为不变
+    // 直射余弦的 SSS wrap 重映射（春v2 同式）：cos = saturate((ndl + w) / (1 + w))，w = SSS_WRAP_MAX ×
+    // 强度——把明暗界拓宽到背光侧（薄叶透光使整株近均匀受光、明暗只由阴影贴图区分）；同一强度线性
+    // 缩放阴影软化半径；w = 0 时退化为 max(ndl, 0)、非 SSS 表面行为不变
     float ndl = dot(normalWorld, lightDirWorld);
     float sssWrap = SSS_WRAP_MAX * sssStrength;
     float ndlWrapped = clamp((ndl + sssWrap) / (1.0 + sssWrap), 0.0, 1.0);
 
-    // 直射光可见性：阴影贴图 PCF，门控用重映射后的余弦（背光 SSS 面也采样——阴影贴图把住穿墙漏光，
-    // 自身叶片遮挡由 normal offset 推出 + SSS 附加软半径部分漏光）。超距 / 出屏由采样端返回 1
-    //（贴图覆盖外按全亮）；晨昏主光源切换的阴影跳变由 vDirectIrradiance 同窗淡黑吸收，无回退门控
+    // 直射光可见性：阴影贴图 PCF，门控用重映射后的余弦（背光 SSS 面也采样——穿墙漏光由阴影贴图把住）
     vec3 shadowVis = ndlWrapped > 0.0
         ? sampleShadowVisibility(relativeWorldPos, normalWorld, ndl, distWorld, sssStrength)
         : vec3(0.0);

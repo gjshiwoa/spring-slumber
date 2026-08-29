@@ -1,34 +1,25 @@
-// 大气物理核心：Chapman 闭式光学深度 + 保能量单次散射（零 raymarch / 零 LUT / 零纹理采样）
+// 大气物理核心：Chapman 闭式光学深度 + 保能量单次散射 + 各向同性环境场多次散射（零 raymarch）
 // 移植自 Shadertoy WcdSW4（MIT，John Payne 2024）https://www.shadertoy.com/view/WcdSW4 ，五处适配：
-//   1. INFINITY = 1/0 改 SKY_NO_HIT = 1e30 哨兵（编译期除零在部分驱动上未定义），
-//      视线终点 -> 大气顶的消光仅在有限 t 时计算（哨兵路径直接取 0，免 Inf/NaN 参数白算）
-//   2. 视线对准太阳时 (e^-tauS - e^-(tauSp+tauV)) / (tauSp+tauV-tauS) 分子分母同归零
-//      （MC 太阳每天正午过天顶必踩，float32 近太阳锥形区还会因消劫出噪点）——
-//      拆成 e^-tauS * (1-e^-x)/x 并对小 |x| 走泰勒保形分支 1 - x/2
-//   3. r^2 - R^2 改 (r-R)(r+R) 防消劫：换小尺度高度参数时原式有 ~10% 亮度抖动
-//   4. float32 溢出防护（erfcx 负支 exp 上限 SKY_ERFCX_EXP_MAX + airMass 钳制 SKY_AIRMASS_MAX，
-//      见函数注释）——原式 |b| 可达 r/H ~ 45，exp(b²) 溢出 Inf，夜晚 / 下视路径产生 NaN / 负值 / 超大值
-//   5. 臭氧系数弃用原作调参、按 Chappius 吸收带真实截面重定形状（原系数 R>G 与真实光谱 G>R 相反，
-//      地平线长路径红衰减过快、日出天空发黄）——数值与来源链接见 constants.glsl OZONE_EXTINCTION_COEFFICIENTS 注释
-// 夜侧无需特判：太阳沉入地平线后 tauS 随 sun 路 airMass 饱和于 SKY_AIRMASS_MAX（取得足够高，
-// energyIntegralRatio 残留的 ~1/tauS 尾巴在自动曝光上限内不可见，见 constants.glsl），天空自然归零（曙暮光带自然呈现）
+//   1. inf 改 SKY_NO_HIT = 1e30 哨兵（编译期 1/0 在部分驱动上未定义）
+//   2. 视线对准太阳的 (e^-tauS - e^-(tauSp+tauV)) / (tauSp+tauV-tauS) 0/0——energyIntegralRatio 泰勒保形
+//   3. r²-R² 改 (r-R)(r+R) 防消劫（换小尺度参数时原式有 ~10% 亮度抖动）
+//   4. float32 溢出防护：erfcx 负支 exp 上限 + airMass 钳制（原式 |b| 可达 r/H ~ 45，exp(b²) 溢出
+//      Inf——夜晚 / 下视路径 NaN 的根源；上限取值的依据见 constants.glsl 的 SKY_ERFCX_EXP_MAX / SKY_AIRMASS_MAX）
+//   5. 臭氧系数弃用原作调参、按 Chappius 吸收带真实截面重定（原系数光谱形状 R>G 与真实相反、
+//      日出天空发黄）——数值与来源见 constants.glsl
+// 夜侧无需特判：太阳沉入地平线后 tauS 随 airMass 饱和、天空自然归零（曙暮光带自然呈现）
 // 多次散射：二阶起近似为「各向同性环境辐射场」（Hillaire 2020 / Wrenninge 多阶近似的最低档）——
-// 环境场量级 = 一阶散射天光的球面方向平均 L̄₁（skyAmbientField，composite12 的 vsh 每帧每光源
-// 48 节点光源锚定环带求积），高阶按「每再散射一次截获比 ρ」的几何级数放大为 L̄₁/(1-ρ)；
-// 视线端 MS 项 = ambientCapture（散射反照率 × (1-e^-tauV)）× 环境场，路径量全部复用单次散射
-// 已算的 airMass、逐 texel 仅 +1 exp 与数条乘加。数值验证（float32 移植、海平面）：正午余弦加权
-// 天光辐照度 ×1.07/×1.12/×1.26（R/G/B）、天顶 ×1.10~1.17、反日侧暮光地平线 ×1.6~1.7、
-// 太阳侧暮光 ×1.16~1.41；夜空地板不被抬高（太阳 -20° 最大 luma 5.1e-10，×720 曝光后不可见）
-// 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：lib/common/globals/constants.glsl（大气常量、PI）
+//   环境场量级 = 一阶散射天光球面方向平均 L̄₁（skyAmbientField 的 48 节点环带求积）× 截获比几何级数
+//   1/(1-ρ)；视线端 MS 项 = ambientCapture × 环境场，路径量全部复用单次散射已算的 airMass。
+//   数值验证：正午天光辐照度 ×1.07~1.26、天顶 ×1.10~1.17、反日侧暮光地平线 ×1.6~1.7、夜空地板不抬高
+// 依赖由接入的 program 先行 include：constants.glsl（大气常量、PI）
 #ifndef LIB_ATMOSPHERE_GLSL
 #define LIB_ATMOSPHERE_GLSL
 
-// 缩放互补误差函数 e^(x^2) * erfc(x)，任意符号参量的有理逼近（Shadertoy 原式；
-// 系数乘积由原式 A~F 六系数各自相除（6 div）合并为「分子连乘 / 分母连乘」单次除法——
-// 各因子均 O(1)、连乘无溢出，float32 数值验证与原式最大相对差 7e-7 即重结合噪声；
-// erfcx 是 LUT 生成端每 texel 最高频的函数，视线 + 下视 tauSp 三介质合计最多 9 次调用）
-// 负参量分支的 exp 上限钳制（SKY_ERFCX_EXP_MAX）：|b| 可达 r/H ~ 45（Mie），b² ~ 2000，
-// float32 下 exp 溢出 Inf 即夜晚 / 下视路径 NaN 的根源；真值超过 e^80 的光学深度早已全遮蔽，钳顶无损
+// 缩放互补误差函数 e^(x^2) * erfc(x)，任意符号参量的有理逼近（Shadertoy 原式；六系数连乘
+// 折叠为单次除法——各因子 O(1) 无溢出，与原式最大相对差 7e-7；erfcx 是 LUT 生成端每 texel
+// 最高频的函数）。负参量分支 exp 上限钳制 SKY_ERFCX_EXP_MAX：|b| 可达 r/H ~ 45，exp(b²) 溢出
+// Inf 即夜晚 / 下视 NaN 的根源；真值超过 e^80 的光学深度早已全遮蔽，钳顶无损
 float erfcx(float x) {
     float t  = abs(x);
     float t2 = t * t;
@@ -53,12 +44,9 @@ float erfcx(float x) {
 }
 
 // 指数大气单条光路的闭式光学深度（Chapman 函数）
-// r 路径起点距地心、z 路径方向对天顶的余弦、t 路径长度（SKY_NO_HIT = 到大气顶无穷远）、H 该介质尺度高度
-// 密度模型为 r² 高斯：exp(-(r²-R²)/H²)，有效尺度高度 = H²/(2R)（Rayleigh 8.05km / Mie 1.54km / 臭氧 16.3km，
-// 即地球真实量级——H 本身是大数值的参数化，不是物理尺度高度）
-// 返回值钳制 [0, SKY_AIRMASS_MAX]：下视掠射分支两支 erfcx 巨值相消在 float32 下是符号不定的垃圾
-//（负值 / NaN→经钳制收敛到边界）；钳顶 1e15 下 τ = βmax × 上限 ≈ 2.9e10 → exp(-τ) = 0——上限刻意远高于
-// exp 归零所需：夜侧 sun 路饱和后 tauS 冻结，energyIntegralRatio 的 ~1/tauS 残尾会成为夜空亮度地板（见 constants.glsl）
+// r 路径起点距地心、z 路径方向对天顶的余弦、t 路径长度（SKY_NO_HIT = 到大气顶无穷远）、H 尺度高度
+// 密度模型与有效尺度高度说明见 constants.glsl。返回值钳制 [0, SKY_AIRMASS_MAX]：下视掠射分支
+// 两支 erfcx 巨值相消在 float32 下是符号不定的垃圾（钳制收敛到边界）；钳顶取值的依据见 constants.glsl
 float airMass(float r, float z, float t, float H) {
     float a = 0.5 * sqrt(PI) * H * exp(-(r - EARTH_RADIUS) * (r + EARTH_RADIUS) / (H * H));
     float b = r * z / H;
@@ -190,16 +178,11 @@ vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 lightDirection,
     return irradiance * (rayleighView * rayleighPhase(mu) + mieView * miePhase(mu)) * scatter;
 }
 
-// 各向同性环境场（多次散射源项）：二阶起的多次散射近似为各向同性辐射场，量级取一阶散射
-// 天光的球面方向平均 L̄₁，高阶按「每再散射一次截获比 ρ」的几何级数放大——返回 L̄₁ / (1 - ρ)，
-// 调用端直接乘 ambientCapture 即得视线 MS 项；composite12 的 vsh 每帧每光源调用一次
-//（48 节点 × ~10 airMass，相对 40k LUT texel 的求值量可忽略），经 varying 传入全部 texel
-// 求积节点锚定光源方向（Δcosθ 等间距 = 等立体角环带、带间黄金角错位）：太阳移动时节点
-// 图案随光源整体旋转、与 Mie 前向峰的相对几何恒定——环境场不随太阳位置错相跳变
-//（节点落在峰肩内 / 外只产生静态偏差，数值验证 ±10% 量级，进游戏并入 SKY_MS_STRENGTH /
-// SKY_BRIGHTNESS 校准）；光源锥内 <~10° 的窄前向峰不被最内环带覆盖，峰对球面平均的贡献
-// 受相函数归一化（∫φdω = 1）抵消、残余为二阶小量。夜侧无需特判：L̄₁ 继承一阶式的
-// tauS 饱和归零，MS 项随光源一起熄灭（数值验证：太阳 -20° 夜空地板不变，见文件头）
+// 各向同性环境场（多次散射源项）：一阶天光球面平均 L̄₁ × 截获比几何级数 1/(1-ρ)，
+// 调用端直接乘 ambientCapture 即得视线 MS 项；composite12 的 vsh 每帧每光源一次（48 节点 × ~10
+// airMass，相对 40k LUT texel 可忽略）、经 varying 传入。求积节点锚定光源方向（等立体角环带、
+// 带间黄金角错位）：太阳移动时节点图案随光源整体旋转，不随太阳位置错相跳变（残余为 ±10% 静态
+// 偏差，进游戏并入 SKY_MS_STRENGTH 校准）；夜侧 L̄₁ 继承 tauS 饱和归零、MS 随光源熄灭。
 // observerRadius / lightOpticalDepth 由 composite12 vsh 预计算（与 LUT 生成端同源）
 vec3 skyAmbientField(float observerRadius, vec3 lightWorld,
                      vec3 lightOpticalDepth, vec3 irradiance) {
@@ -245,9 +228,8 @@ vec3 atmosphericRadiance(vec3 origin, vec3 direction, vec3 lightDirection,
     return single + viewCapture * ambientField * SKY_MS_STRENGTH;
 }
 
-// 太阳直射透过率（0~1，天顶白、地平线偏红、地平线下归零）
-// 已接入 lighting.glsl 直射光：直射辐照度 = 大气顶辐照度（SOLAR / MOON_IRRADIANCE）× 本函数，
-// origin 取表面点海拔（逐像素，光照库构造）；direction 须归一化
+// 太阳直射透过率（0~1，天顶白、地平线偏红、地平线下归零）：直射辐照度 = 大气顶辐照度 × 本函数；
+// deferred_init 取 vsh 相机高度近似调用（经 vDirectTransmittance varying），逐表面点路径保留此入口
 vec3 solarTransmittance(vec3 origin, vec3 direction) {
     vec3  zenith = normalize(origin);
     float r = length(origin);

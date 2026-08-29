@@ -1,15 +1,9 @@
-// 最终输出: final
-// vsh = 通用全屏 vsh（program/fullscreen_vsh.glsl——vTexCoord / vExposure 等
-// 帧数据 varying 的来源，本 program 无自定义 vsh 段）；fsh 按需声明同名 in
-// 单 pass 完成收尾全链（BSL / Complementary 的 final 同款合并，免占 composite 槽）：
-//   读线性 colortex0（composite_taa 后的未曝光线性 HDR）+ colortex1 tile0（上采样回卷合并后的
-//   完整泛光）→ tonemap 前线性域合成（getBloom tent 放大 × BLOOM_STRENGTH 相加）→
-//   乘 colortex7 曝光槽位的自适应曝光（lib/post/exposure.glsl，composite12 测光并写入；
-//   vsh 取一次经 varying 传入，免每像素对槽位 texelFetch）→ AgX tonemap（末段 pow 2.2 即
-//   「回到线性」display-referred linear，春雷同款）→ gamma 矫正（linearToSrgb）输出到屏幕
-// linearToSrgb 是全管线唯一离开线性空间的位置；colortex0 终态保持 TAA 后线性 HDR，
-// 原先 composite13（bloom 合成）/ composite14（tonemap）两个全屏 pass 的 colortex0 读写
-// 往返与 colortex7 全屏透传（合计 ~46B/px@1080p）由此消除
+// 最终输出: final（vsh = 通用全屏 vsh，本 program 无自定义 vsh 段；fsh 按需声明同名 in）
+// 单 pass 收尾全链（BSL / Complementary 同款合并，不占 composite 槽）：读线性 colortex0
+//（composite_taa 后、未曝光）+ colortex1 tile0 → 线性域合成 bloom（getBloom × BLOOM_STRENGTH）
+// → 乘 vExposure（composite12 写入槽位，vsh 取一次经 varying 传入）→ AgX → linearToSrgb 输出屏幕。
+// linearToSrgb 是全管线唯一离开线性空间的位置；原 composite13/14 两全屏 pass 的 colortex0 读写
+// 往返与 colortex7 全屏透传（~46B/px@1080p）由此消除
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/globals/uniforms.glsl"

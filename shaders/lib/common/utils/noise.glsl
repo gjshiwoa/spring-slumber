@@ -1,6 +1,7 @@
 // 噪声 / 抖动 / TAA jitter 工具（通用，与具体效果解耦）
 // 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：
-//   lib/common/globals/constants.glsl（GOLDEN_RATIO / TAA_JITTER_SAMPLES / TAA_JITTER_SCALE）、
+//   lib/common/globals/constants.glsl（GOLDEN_RATIO / TAA_JITTER_SAMPLES / TAA_JITTER_SCALE /
+//     TAAU 开启时的 RENDER_SCALE）、
 //   lib/common/globals/uniforms.glsl（frameCounter / viewWidth / viewHeight）
 #ifndef LIB_NOISE_GLSL
 #define LIB_NOISE_GLSL
@@ -20,12 +21,10 @@ float bayer2(vec2 a) {
 #define bayer32(a) (bayer16(0.5 * (a)) * 0.25 + bayer2(a))
 #define bayer64(a) (bayer32(0.5 * (a)) * 0.25 + bayer2(a))
 
-// temporal bayer 时域噪声（春v2 temporalBayer64 同款）：单帧为 bayer64 空间规则图案（相邻像素值相近、
-// 8x8 tile 内规则渐变——空间低频，TAA 方差钳制的邻域统计不被高频噪声抬高方差、历史权重不被误压），
-// 帧间按 golden ratio（1/φ）低差异步进旋转相位，与 bayer64 的 64 相位对齐——64 帧恰好遍历 [0,1) 的
-// 64 个均匀错开相位，时间累积等价 64 相位超采样（此前的 IGN 逐像素去相关、单帧内高频，邻域统计会把
-// 噪声当方差钳掉历史，收敛慢且阴影残留噪点）。用于时域旋转 / 抖动采样图案（如阴影 PCF 采样盘，
-// 见 lib/lighting/shadow.glsl），composite_taa 时间累积把噪声解析成收敛结果
+// temporal bayer 时域噪声（春v2 同款）：单帧为 bayer64 空间低频图案（相邻像素值相近——TAA 方差
+// 钳制的邻域统计不被高频噪声抬高方差，故弃用单帧高频的 IGN），帧间按 golden ratio 步进相位、
+// 与 bayer64 的 64 相位对齐——64 帧遍历 [0,1) 的 64 个均匀错开相位，时间累积等价 64 相位超采样；
+// 用于时域旋转 / 抖动采样图案（阴影 PCF 采样盘），composite_taa 时间累积解析成收敛结果
 float temporalBayer64(vec2 pixelPos) {
     return fract(bayer64(pixelPos) + float(frameCounter % 64) * GOLDEN_RATIO);
 }
@@ -44,8 +43,13 @@ vec2 taaJitterUV() {
     return taaJitterSample() / vec2(viewWidth, viewHeight);
 }
 
-// vsh 注入：clip 空间平移（春雷 applyStableJitter 同款；1 px = 2/res NDC，乘 w 保持透视正确）
+// vsh 注入：clip 空间平移（1 px = 2/res NDC，乘 w 保透视）。TAAU：先缩放进左下 [0,S]² 子区域
+// 再叠 jitter——jitter 仍以全屏（目标）像素为单位注入、幅度语义自动成为目标像素域抖动，
+// composite_taa 的上采样解析据此恢复目标分辨率细节
 vec4 applyTAAJitter(vec4 clipPos) {
+#ifdef TAAU
+    clipPos.xy = clipPos.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * clipPos.w;
+#endif
     clipPos.xy += taaJitterSample() * (2.0 / vec2(viewWidth, viewHeight)) * clipPos.w;
     return clipPos;
 }
@@ -58,5 +62,22 @@ vec2 applyJitter(vec2 uv) {
 vec2 applyInverseJitter(vec2 uv) {
     return uv - taaJitterUV();
 }
+
+// ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段） ----------------
+// GPU 多边形裁剪按全屏 NDC、不知子区域边界——视锥外近带（NDC xy ∈ [1, 1/S]）几何缩放后落进
+// 子区域外、白跑 fsh（正确性由读端钳边免疫，纯性能剔除；kappa / photon / FSR2 同款）。调用纪律：
+// **置于集中屏幕导数之后、一切纹理采样之前**（discard 后幸存像素导数未定义，与 cutout discard
+// 同一纪律）。ceil + 1 texel 容差吸收非整渲染分辨率的半像素边界、宁可少剔不误杀；TAAU 关闭时
+// 恒 false 零成本。#ifdef STAGE_FRAGMENT 守卫——gl_FragCoord 为片段专属输入而本文件亦被 vsh 编译
+#ifdef STAGE_FRAGMENT
+bool outsideRenderRegion() {
+#ifdef TAAU
+    vec2 limit = ceil(vec2(viewWidth, viewHeight) * RENDER_SCALE) + 1.0;
+    return any(greaterThan(gl_FragCoord.xy, limit)) || any(lessThan(gl_FragCoord.xy, vec2(-1.0)));
+#else
+    return false;
+#endif
+}
+#endif
 
 #endif

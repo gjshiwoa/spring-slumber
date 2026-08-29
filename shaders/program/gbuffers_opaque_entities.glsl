@@ -27,18 +27,20 @@ layout(location = 1) out vec4 outDetail;  // colortex5
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
 
-    // 导数计算必须先于 discard（quad 内被提前终止的透明 texel 会使幸存像素的 dFdx/dFdy
-    // 拿到未定义值，cutout 边缘法线错乱——同 gbuffers_opaque 的顺序约束）；
-    // 先集中求好再过 discard，TBN 构造与 normals 采样推迟到后面
+    // 导数先于 discard（同 gbuffers_opaque 的顺序约束——discard 后幸存像素导数未定义）；
+    // TBN 构造与 normals 采样推迟到 discard 之后
     vec3 dp1 = dFdx(vViewPos);
     vec3 dp2 = dFdy(vViewPos);
     vec2 duv1 = dFdx(vTexCoord);
     vec2 duv2 = dFdy(vTexCoord);
 
+    // TAAU 子区域外片元剔除（机制与调用纪律见 noise.glsl 的 outsideRenderRegion；
+    // 本程序已有 cutout discard、Early-Z 无额外损失——视锥边缘实体正是剔除的主要受益者）
+    if (outsideRenderRegion()) discard;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
     color.rgb = mix(color.rgb, entityColor.rgb, entityColor.a);
-    // 上一行为 texcolor 的半透明混合、只作用于 rgb——物品标记不参与混合，
-    // a 通道整像素置空（实体入口无 gsh 程序化判定，标记槽位恒空）
+    // 上一行为 texcolor 的半透明混合、只作用于 rgb——标记不参与混合，a 通道整像素置空
+    //（实体入口无 gsh 程序化判定，标记槽位恒空）
     color.a = MATERIAL_NONE;
 
     // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
