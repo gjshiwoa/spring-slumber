@@ -33,9 +33,9 @@ float temporalBayer64(vec2 pixelPos) {
 // 由 gbuffer 类 program 的 vsh 与通用全屏 vsh（program/fullscreen_vsh.glsl，其 vJitter 即
 // taaJitterUV 的 vsh 侧一次算好）按需平铺引入
 
-// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 16 相位）
+// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 32 相位查表）
 vec2 taaJitterSample() {
-    return TAA_JITTER_SAMPLES[frameCounter & 15] * TAA_JITTER_SCALE;
+    return TAA_JITTER_SAMPLES[frameCounter & 31] * TAA_JITTER_SCALE;
 }
 
 // 当前帧抖动（uv 域）
@@ -44,8 +44,9 @@ vec2 taaJitterUV() {
 }
 
 // vsh 注入：clip 空间平移（1 px = 2/res NDC，乘 w 保透视）。TAAU：先缩放进左下 [0,S]² 子区域
-// 再叠 jitter——jitter 仍以全屏（目标）像素为单位注入、幅度语义自动成为目标像素域抖动，
-// composite_taa 的上采样解析据此恢复目标分辨率细节
+// 再叠 jitter——注意 jitter 在子区域缩放**之后**的 NDC 域注入，NDC→viewport 换算按整块 buffer，
+// 有效位移 = ±0.5 **渲染纹素**（buffer 纹素 = 子区域内渲染纹素，与 S 无关；c13 / Kappa / Photon
+// 三家同语义）。解析端（composite_taa）的去抖补偿须在同一 buffer 纹素域等量施加，见 taa.glsl
 vec4 applyTAAJitter(vec4 clipPos) {
 #ifdef TAAU
     clipPos.xy = clipPos.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * clipPos.w;
@@ -64,8 +65,9 @@ vec2 applyInverseJitter(vec2 uv) {
 }
 
 // ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段） ----------------
-// GPU 多边形裁剪按全屏 NDC、不知子区域边界——视锥外近带（NDC xy ∈ [1, 1/S]）几何缩放后落进
-// 子区域外、白跑 fsh（正确性由读端钳边免疫，纯性能剔除；kappa / photon / FSR2 同款）。调用纪律：
+// GPU 多边形裁剪按全屏 NDC、不知子区域边界——视锥外近带（NDC xy ∈ [1, 2/S−1]，S=0.75 时
+// [1, 1.67]：缩放式 NDC' = NDC·S + S−1 在裁剪立方 NDC' = 1 处反解的上限；负侧贴齐 −1、无对应带）
+// 几何缩放后落进子区域外、白跑 fsh（正确性由读端钳边免疫，纯性能剔除；kappa / photon / FSR2 同款）。调用纪律：
 // **置于集中屏幕导数之后、一切纹理采样之前**（discard 后幸存像素导数未定义，与 cutout discard
 // 同一纪律）。ceil + 1 texel 容差吸收非整渲染分辨率的半像素边界、宁可少剔不误杀；TAAU 关闭时
 // 恒 false 零成本。#ifdef STAGE_FRAGMENT 守卫——gl_FragCoord 为片段专属输入而本文件亦被 vsh 编译

@@ -2,14 +2,16 @@
 // 深度重投影（无速度缓冲，十字最近片元锚点）+ Reinhard 域 YCoCg 方差钳制（μ±γσ）+ 速度 / 解遮挡
 // 自适应混合；历史 a 通道存上帧最近片元线性深度做解遮挡置信（不占独立缓冲）
 // 天空与几何同路径（无早退、吃满时间过滤）：deferred_init 已按当前帧 jitter 亚像素求值天空，
-// 本 pass 时间累积把 16 相位采样解析成亚像素抗锯齿；天空锚点走无穷远方向仅旋转重投影、线性深度
+// 本 pass 时间累积把 32 相位采样解析成亚像素抗锯齿；天空锚点走无穷远方向仅旋转重投影、线性深度
 // 取哨兵进同一置信公式（天空↔天空满置信、天空↔几何自然归零，免分支）
 // 钳制域曝光归一化（春雷同思路）：统计 / 钳制 / 混合在「线性色 × 上一帧自适应曝光」工作域进行、
 // 结果除回——本管线曝光在 final 才应用，colortex0 暗景原始值极小、σ 跌破 epsilon 地板会使钳制盒
 // 退化成不钳 → 低亮度拖影；乘曝光后工作域稳定在 ~0.2-1
 // TAAU：几何渲染在左下 [0,S]² 子区域，本 pass quad 全屏、即上采样器——resolveTAA 把目标域 uv/pixel
-// 换算为渲染域（见函数内注释），当前帧 catmullRom5 上采样与全屏历史混合后恢复全屏；S=1 时编译期
-// 逐位退化为纯 TAA。性能：锚点位置单次重建、prevDepth 随 catmullRom5 a 通道一趟带回、采样全
+// 换算为渲染域（见函数内注释），当前帧 catmullRom5 上采样做**全额去抖**（Kappa / Photon 同款）后与
+// 全屏历史混合恢复全屏；混合链 = 基础权重（TAAU 抬档）→ 上采样置信度门控（UE 最大核权重法）→
+// Karis 距离防闪（稳定区等效注入压到 ~0）→ 偏心拒绝（运动中抬当前帧），S=1 时编译期逐位退化为
+// 纯 TAA。性能：锚点位置单次重建、prevDepth 随 catmullRom5 a 通道一趟带回、采样全
 // textureLod 0；统计与深度扫描均十字 5-tap（不含对角，c13 / Photon 同款取舍），最坏 16 fetch
 //（TAAU 20），换来整段像素成本 ×S²
 // 依赖先行 include：constants.glsl（TAA_*）、uniforms.glsl（colortex0/3、depthtex0、视口、
@@ -78,9 +80,13 @@ vec3 taaInverseTonemap(vec3 color) {
 // 历史钳制：十字 5-tap（中心 + 上下左右）当前帧统计 μ / σ，历史超出 μ±γσ 的部分截到盒面
 //（保方向的 clipAABB，春雷 / 春v2 同款；比逐通道 clamp 少丢色相）；较 3×3 省 4 次 fetch，
 // 盒略粗由 γ 抬一档补偿（TAA_CLIP_GAMMA 1.5）；stats 样本与入参历史色均已在曝光归一化工作域
-// resolution 显式传入（TAAU 下为渲染域分辨率——统计十字采样子区域内的 colortex0；统计盒按
-// 渲染像素间隔覆盖 ±1/S 目标像素、天然宽于原生档，γ 维持原值即够）
-vec3 clipHistoryToNeighborhood(vec3 historyColor, ivec2 pixel, float clipGamma, float exposure, ivec2 resolution) {
+// outClipDistance：Karis「距盒边距离」∈ [0,1]（Kappa / Photon 同式）——历史被截 → 0（与当前
+// 邻域不符，当前帧正常注入收敛）；稳居盒内 → 1（与当前邻域一致，调用方据此把当前帧权重压向 0
+// 防闪）。工作域已含曝光归一化，距离直接乘增益、不再乘曝光
+// resolution 显式传入：TAAU 下为渲染域分辨率——统计十字采样子区域内的 colortex0；统计盒按
+// 渲染像素间隔覆盖 ±1/S 目标像素、天然宽于原生档，γ 维持原值即够
+vec3 clipHistoryToNeighborhood(vec3 historyColor, ivec2 pixel, float clipGamma, float exposure, ivec2 resolution,
+                                out float outClipDistance) {
     ivec2 bounds = resolution - 1;
 
     vec3 centerColor = rgbToYCoCg(taaTonemap(texelFetch(colortex0, pixel, 0).rgb * exposure));
@@ -109,24 +115,46 @@ vec3 clipHistoryToNeighborhood(vec3 historyColor, ivec2 pixel, float clipGamma, 
     vec3 clipVector = clipped - center;
     vec3 unit = abs(clipVector / extents);
     float maxUnit = max(unit.x, max(unit.y, unit.z));
-    if (maxUnit > 1.0) clipped = center + clipVector / maxUnit;
+    bool clippedToBox = maxUnit > 1.0;
+    if (clippedToBox) clipped = center + clipVector / maxUnit;
+
+    vec3 toBoxEdge = min(clipped - aabbMin, aabbMax - clipped);
+    outClipDistance = clippedToBox ? 0.0 : clamp(length(toBoxEdge) * TAA_CLIP_DISTANCE_GAIN, 0.0, 1.0);
 
     return taaInverseTonemap(yCoCgToRgb(clipped));
 }
 
 // ---------------- 解析主入口 ----------------
 
+// 上采样置信度（UE「最大核权重」法，Photon catmull_rom_filter 的 confidence 同式）：f 与
+// catmullRom5 内部 f = fract(position − 0.5) 同源；采样位在纹素中心 → 1（采到「真像素」）、
+// 纹素角点 → ~0.32（纯插值过渡、两帧间随相位漂移的人造值）。用标准 Catmull-Rom 权重族即可——
+// 锐化参数只改权重分布、不动「离纹素中心越近越可信」的单调性，数值略保守无碍
+float catmullConfidence(vec2 f) {
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+    vec2 w0 = -0.5 * f  + f2 - 0.5 * f3;
+    vec2 w1 =  1.0 - 2.5 * f2 + 1.5 * f3;
+    vec2 w2 =  0.5 * f  + 2.0 * f2 - 1.5 * f3;
+    vec2 w3 = -0.5 * f2 + 0.5 * f3;
+    return max(max(w0.x, w1.x), max(w2.x, w3.x))
+         * max(max(w0.y, w1.y), max(w2.y, w3.y));
+}
+
 // 读当前线性 colortex0 + depthtex0，重投影采 colortex3 历史，钳制混合后返回新颜色（已除回归一化曝光）；
 // outHistoryDepth 输出本帧最近片元线性深度（随颜色一起写进历史 a 通道供下帧置信比对）；
 // exposure 为上一帧自适应曝光（调用方经 varying 传入），仅作钳制域归一化、不影响输出 / 存储的亮度
 vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float outHistoryDepth) {
     // TAAU 域换算：入参 uv / pixel 为全屏目标域（本 pass quad 全屏），几何渲染在 buffer 左下
-    // [0,S]² 子区域——renderResF = floor(视口 × S) 即子区域 buffer 像素数（一个渲染像素 = 子区域内
-    // 一个 buffer 像素）。深度 / 统计十字的渲染域纹素 renderPixel：目标像素 x 的邻域锚点在渲染纹素
-    // x·S 处（renderPixel = ivec2(uv × renderResF)）；重投影链走 closest.xy（渲染视场域归一化）、
-    // 与 prevUv 数值域一致直接相减。S=1 时 renderPixel == pixel、上采样分支编译期不含，纯 TAA 逐位退化
+    // [0,S]² 子区域——renderResF = round(视口 × S) 即子区域 buffer 像素数（一个渲染像素 = 子区域内
+    // 一个 buffer 像素）。取 round 对齐 quad 光栅实际覆盖：像素中心规则下覆盖 p ≤ W·S − 0.5、
+    // 列数 = round(W·S)；取 floor 会在 W·S 非整数（窗口宽高非 4 倍数）时比实际少 1 列，该列被
+    // 几何 / deferred_init 写入、锚点与统计十字却永远读不到。深度 / 统计十字的渲染域纹素
+    // renderPixel：目标像素 x 的邻域锚点在渲染纹素 x·S 处（renderPixel = ivec2(uv × renderResF)）；
+    // 重投影链走 closest.xy（渲染视场域归一化）、与 prevUv 数值域一致直接相减。S=1 时
+    // renderPixel == pixel、上采样分支编译期不含，纯 TAA 逐位退化
 #ifdef TAAU
-    vec2 renderResF = floor(vec2(viewWidth, viewHeight) * RENDER_SCALE);
+    vec2 renderResF = floor(vec2(viewWidth, viewHeight) * RENDER_SCALE + 0.5);
     ivec2 renderRes = ivec2(renderResF);
     ivec2 renderPixel = clamp(ivec2(uv * renderResF), ivec2(0), renderRes - 1);
 #else
@@ -134,29 +162,38 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     ivec2 renderPixel = pixel;
 #endif
 
-    // 天空（closest.z >= 1：十字全空）不早退、与几何同路径时间累积（16 相位采样解析成亚像素抗锯齿，
+    // 天空（closest.z >= 1：十字全空）不早退、与几何同路径时间累积（32 相位采样解析成亚像素抗锯齿，
     // 消除大气地平线高频边界锯齿）；重投影切换无穷远方向仅旋转链、锚点线性深度取哨兵（同一条置信
     // 公式）；边缘像素因 jitter 在天空 / 几何间翻转，由最近片元锚点邻域膨胀落到几何路径、不闪烁爬行
     float centerDepth = texelFetch(depthtex0, renderPixel, 0).r;
     vec3 closest = closestDepthCross(renderPixel, centerDepth, renderRes);
     bool isSky = closest.z >= 1.0;
     bool isHand = closest.z < TAA_HAND_DEPTH;
-    // 当前帧：半 jitter 补偿采样（几何 +jitter 后像素含 center+j 处场景，采样向 jitter 方向偏一半——
-    // 抗锯齿收敛与锐度折中，c13 / Bliss 同款）；乘曝光进归一化工作域。
-    // TAAU 上采样（Photon 同构）：采样 uv =（目标域 uv + 半 jitter 补偿）× S 压进子区域纹理域，
-    // catmullRom5 的 texSize 必须传**纹理真实尺寸**（viewWidth/Height——函数内部 position = uv×texSize
-    // 定位纹素、tc = center/texSize 回纹理域；误传渲染分辨率会与未乘 S 的 uv 相抵消、退化成全屏域
-    // 恒等映射采到子区域外旧帧残留），采样 uv 乘 S 后自动把目标像素 x 落位 x·S 渲染纹素（即放大
-    // S 倍）；钳进子区域边缘 0.75 渲染 texel，核半径 2 texel 的越界 tap 由引擎 clamp-to-edge 兜底
-    //（边缘纹素重复采样、无垃圾读入）。与全屏历史（colortex3）混合、时间累积恢复超渲染分辨率细节
+    // 当前帧：TAAU 走上采样（几何 +jitter 后像素含 center+j 处场景）；乘曝光进归一化工作域。
+    // **全额去抖（Kappa / Photon 同款，本块是 TAAU 糊 / 闪修复的核心）**：applyTAAJitter 在子区域
+    // 缩放**之后**的 NDC 域注入 jitter，换算到 buffer 域的有效位移 = ±0.5 渲染纹素、与 S 无关
+    //（三家参考同语义）；去抖补偿必须等量施加在 buffer 纹素域——jitterUV = j/W 本就是 buffer 域
+    // uv 单位，直接加在 uv·S 之后。旧式 (uv + jitterUV·0.5)·S 把补偿一并乘了 S：S=0.5 时只剩
+    // 全额的 1/4，每帧相位错位最大 ~0.375 渲染纹素、历史与当前帧系统性对不齐（糊），方差钳制逐帧
+    // 以不同相位截 histories（闪）。取全额而非 c13 的半抖：每帧样本无偏对齐目标像素（锐），AA 信息
+    // 改由「各相位重建结果的差异」经时间累积提供。catmullRom5 的 texSize 传**纹理真实尺寸**
+    //（viewWidth/Height——函数内部 position = uv×texSize 定位纹素；误传渲染分辨率会退化为全屏域
+    // 恒等映射采到子区域外旧帧残留）；钳进子区域边缘 0.25 buffer texel——左 / 下缘即缓冲边缘，
+    // 核半径 2 texel 的越界 tap 由引擎 clamp-to-edge 兜底（与 S=1 同款），右 / 上缘越界 tap 落进
+    // 缓冲内上帧 TAA 残留（同视场位置、内容≈本帧）。余量刻意小：最左列目标像素的采样位低至
+    // 0.25·S ≈ 0.19 buffer texel，边距 0.75 会让该列恒触底钳、相位压成定点失去时间抗锯齿
 #ifdef TAAU
-    vec2 upsampleUV = clamp((uv + jitterUV * 0.5) * RENDER_SCALE,
-                            0.75 / vec2(viewWidth, viewHeight),
-                            RENDER_SCALE - 0.75 / vec2(viewWidth, viewHeight));
+    vec2 upsampleUV = clamp(uv * RENDER_SCALE + jitterUV,
+                            0.25 / vec2(viewWidth, viewHeight),
+                            RENDER_SCALE - 0.25 / vec2(viewWidth, viewHeight));
     vec3 currentColor = catmullRom5(colortex0, upsampleUV,
                                     vec2(viewWidth, viewHeight),
                                     TAAU_UPSAMPLE_SHARPNESS).rgb * exposure;
+    // 与上采样核同源的置信度（角点 ~0.32 / 中心 1），供混合链门控
+    float upsampleConfidence = catmullConfidence(fract(upsampleUV * vec2(viewWidth, viewHeight) - 0.5));
 #else
+    // 原生档半 jitter 补偿（c13 / 春雷同款）：几何 +jitter 后像素含 center+j 处场景，采样向 jitter
+    // 方向偏一半——抗锯齿收敛与锐度折中；TAAU 不适用（见上），两分支刻意不同
     vec3 currentColor = textureLod(colortex0, uv + jitterUV * 0.5, 0.0).rgb * exposure;
 #endif
 
@@ -201,15 +238,38 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     }
 
     // 方差钳制；置信度低时放宽 γ 防鬼影（春雷自适应同思路）；历史 rgb 乘曝光进工作域（a 为深度不乘）
+    float clipDistance;
     float clipGamma = mix(TAA_CLIP_GAMMA_MAX, TAA_CLIP_GAMMA, depthConf);
-    vec3 historyWorking = clipHistoryToNeighborhood(history.rgb * exposure, renderPixel, clipGamma, exposure, renderRes);
+    vec3 historyWorking = clipHistoryToNeighborhood(history.rgb * exposure, renderPixel, clipGamma, exposure, renderRes, clipDistance);
 
-    // 当前帧权重：基础 + 运动收敛 + 解遮挡收敛（春v2 低配版混合公式思路）
-    float blend = TAA_BLEND_BASE + velocityPx * TAA_BLEND_MOTION + (1.0 - depthConf) * TAA_BLEND_DISOCCCLUSION;
+    // 当前帧权重混合链（顺序参照 Photon：地板先立、门控后压，门控允许压破地板）：
+    // ① 基础 + 运动收敛 + 解遮挡收敛（春v2 低配版公式）——TAAU 基础抬到 0.12（c13 同值）：上采样
+    //    帧是锐度与相位的唯一来源、偏低必糊；防闪不靠压基础权重，靠后续两级门控
+#ifdef TAAU
+    float blendBase = TAAU_BLEND_BASE;
+#else
+    float blendBase = TAA_BLEND_BASE;
+#endif
+    float blend = blendBase + velocityPx * TAA_BLEND_MOTION + (1.0 - depthConf) * TAA_BLEND_DISOCCCLUSION;
     blend = clamp(blend, TAA_BLEND_MIN, 1.0);
     if (isHand) blend = max(blend, TAA_BLEND_HAND_MIN); // 手部历史快收敛，防视角摆动拖影
 
-    // 屏幕外或首帧已在历史采样前直接采用当前帧。
+    // ② TAAU 置信度门控：上采样落在纹素角点（插值过渡）时当前帧降权趋零、细节交还时间累积——
+    //    角点插值值随相位两帧间漂移，按基础权重恒定注入正是静止高频细节闪烁的来源
+#ifdef TAAU
+    blend *= pow(upsampleConfidence, TAAU_CONFIDENCE_POWER);
+#endif
+
+    // ③ Karis 距离防闪（Kappa / Photon 同款）：历史稳居钳制盒内 = 与当前邻域一致，当前帧权重压向
+    //    0（纯历史、不再注入相位噪声）；被截 / 濒边时 clipDistance → 0、正常收敛。静止场景由此
+    //    收敛到零闪烁，运动 / 解遮挡不受影响（历史被截即归零）
+    blend *= 1.0 - clipDistance;
+
+    // ④ 偏心拒绝（Zombye）：重投影落点偏离历史纹素中心（= 有运动、历史采样为插值）时按比例抬高
+    //    当前帧权重，削运动拖影 / 运动糊；静止时偏心因子 = 1 恒等、原生档同样受益
+    vec2 pixelOffset = 1.0 - abs(2.0 * fract(historyUv * vec2(viewWidth, viewHeight)) - 1.0);
+    float offcenterFactor = sqrt(pixelOffset.x * pixelOffset.y) * TAA_OFFCENTER_REJECTION + (1.0 - TAA_OFFCENTER_REJECTION);
+    blend = 1.0 - (1.0 - blend) * offcenterFactor;
 
     // 除回归一化曝光：输出与历史存储均回到未曝光的线性域（曝光由 final 统一应用）
     return max(mix(historyWorking, currentColor, blend) / exposure, vec3(0.0));

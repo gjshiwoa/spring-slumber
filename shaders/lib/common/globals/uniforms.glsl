@@ -22,7 +22,7 @@ uniform vec4 entityColor; // 实体着色（受伤红闪等），rgb 为目标�
 uniform float viewWidth;  // 视口宽度（像素）；lib/post/bloom.glsl 计算 colortex0 源纹素尺寸
 uniform float viewHeight; // 视口高度（像素）；同上
 uniform float frameTime;  // 帧间隔（秒）；自动曝光时间适应
-uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 15）与首帧守卫
+uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 31）与首帧守卫
 
 // ---- TAA 重投影（lib/common/utils/noise.glsl + lib/post/taa.glsl + utils/space.glsl 上一帧换算）----
 uniform vec3 cameraPosition;         // 本帧相机世界坐标

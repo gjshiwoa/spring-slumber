@@ -126,9 +126,12 @@ const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
 );
 
 // ---- TAA（lib/common/utils/noise.glsl + lib/post/taa.glsl）----
-const float TAA_JITTER_SCALE = 1.0;  // jitter 幅度缩放（1.0 = 满幅 ±0.5 px，即 1 px 跨度；降低可换锐度）
-// Halton(2,3) 16 相位序列，像素域 [-0.5, 0.5]（春雷同表）；查表纯 GLSL 实现，不依赖 properties 自定义 uniform（旧版 OptiFine 兼容）
-const vec2 TAA_JITTER_SAMPLES[16] = vec2[16](
+const float TAA_JITTER_SCALE = 1.0;  // jitter 幅度缩放（1.0 = 满幅 ±0.5 渲染纹素，即 1 纹素跨度；降低可换锐度）
+// Halton(2,3) 32 相位序列，像素域 [-0.5, 0.5]（春雷同族、扩到 32 项）；查表纯 GLSL 实现，不依赖
+// properties 自定义 uniform（旧版 OptiFine 兼容）。相位数是 TAAU 低渲染比的目标网格覆盖数：
+// 16 相位在 S=0.5 下按 AGENTS 实测定档不足（FSR2 低比例换 72 相位同因），32 项查表零成本补齐；
+// 原生档（S=1）16/32 观感无差，统一用本表
+const vec2 TAA_JITTER_SAMPLES[32] = vec2[32](
     vec2( 0.0,    -0.16666667), vec2(-0.25,    0.16666667),
     vec2( 0.25,   -0.38888889), vec2(-0.375,  -0.05555556),
     vec2( 0.125,   0.27777778), vec2(-0.125,  -0.27777778),
@@ -136,16 +139,26 @@ const vec2 TAA_JITTER_SAMPLES[16] = vec2[16](
     vec2( 0.0625, -0.46296296), vec2(-0.1875, -0.12962963),
     vec2( 0.3125,  0.20370370), vec2(-0.3125, -0.35185185),
     vec2( 0.1875, -0.01851852), vec2(-0.0625,  0.31481481),
-    vec2( 0.4375, -0.24074074), vec2(-0.46875, 0.09259259)
+    vec2( 0.4375, -0.24074074), vec2(-0.46875,  0.09259259),
+    vec2( 0.03125, 0.42592593), vec2(-0.21875, -0.42592593),
+    vec2( 0.28125, -0.09259259), vec2(-0.34375,  0.24074074),
+    vec2( 0.15625, -0.31481481), vec2(-0.09375,  0.01851852),
+    vec2( 0.40625,  0.35185185), vec2(-0.40625, -0.20370370),
+    vec2( 0.09375,  0.12962963), vec2(-0.15625,  0.46296296),
+    vec2( 0.34375, -0.48765432), vec2(-0.28125, -0.15432099),
+    vec2( 0.21875,  0.17901235), vec2(-0.03125, -0.37654321),
+    vec2( 0.46875, -0.04320988), vec2(-0.484375, 0.29012346)
 );
 const float TAA_HISTORY_SHARPNESS   = 0.65; // 历史 Catmull-Rom 锐化系数（春雷 0.6 / 春v2 低配版 0.8 之间）
 const float TAA_CLIP_GAMMA          = 1.5;  // 方差钳制 γ 基础值（深度置信度高时用）；十字 5-tap 统计较 3×3 盒略粗，γ 抬一档补偿
 const float TAA_CLIP_GAMMA_MAX      = 2.25; // 深度置信度低时的放宽上限（防鬼影，春雷自适应同思路）
 const float TAA_TONEMAP_DOMAIN_MAX  = 0.995; // 钳制盒 Y 通道上界帽：高对比边缘 μ+γσ 可越出 1，落点 Y>1 会使逆变换分母变负被地板放大 1e5 倍（边缘极亮爆闪）；0.995 对应工作域 luma ~200 无损
-const float TAA_BLEND_BASE          = 0.05; // 当前帧基础权重（历史权重 0.95）
+const float TAA_CLIP_DISTANCE_GAIN  = 5.0;  // Karis 距离防闪增益（Kappa / Photon 同式同值）：历史稳居钳制盒内时把当前帧权重压向 0——恒定注入相位漂移的当前帧样本是静止细节闪烁的主源；工作域已含曝光归一化，距离不再乘曝光
+const float TAA_OFFCENTER_REJECTION = 0.25; // 偏心拒绝强度（Zombye，Kappa / Photon / c13 同族 0.25）：重投影落点偏离纹素中心（=有运动）时按比例抬高当前帧权重，削运动拖影 / 运动糊
+const float TAA_BLEND_BASE          = 0.05; // 当前帧基础权重（历史权重 0.95；原生档专用，TAAU 见 TAAU_BLEND_BASE）
 const float TAA_BLEND_MOTION        = 0.02; // 每像素速度的当前帧权重增量（运动收敛）
 const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 深度置信失效（解遮挡）时的当前帧权重增量
-const float TAA_BLEND_MIN           = 0.02; // 当前帧权重下限（历史权重上限 0.98）
+const float TAA_BLEND_MIN           = 0.02; // 当前帧权重下限（历史权重上限 0.98）；置信度 / Karis 防闪在其后施加、允许压破下限（下限防的是「无信息时不信任历史」，防闪是「有信息时明确信任历史」）
 const float TAA_BLEND_HAND_MIN      = 0.1;  // 手部当前帧权重下限（防手部拖影）
 const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）
 const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与天空像素哨兵——天空↔天空 |Δ|=0 满置信、天空↔几何自然归零（置信公式免分支）
@@ -154,12 +167,16 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 
 // ---- TAAU 时域上采样（子区域渲染 + composite_taa 解析上采样；关闭即纯 TAA，编译期逐位退化）----
 // 机制 = c13 / Bliss 子区域缩放 + Photon / Kappa「TAA pass 即上采样器」（全貌见 AGENTS.md）：
-// 几何渲染进左下 [0,S]² 子区域、像素成本 ×S²，composite_taa 上采样恢复全屏——bloom 链及之后零适配；
-// jitter 幅度自动成为目标像素域抖动、公式零改动。预处理 #if 不支持浮点比较，开关宏与数值常量分离
+// 几何渲染进左下 [0,S]² 子区域、像素成本 ×S²，composite_taa 上采样恢复全屏——bloom 链及之后零适配。
+// jitter 有效幅度恒为 ±0.5 渲染纹素（注入在子区域缩放之后的 NDC 域，c13 / Kappa / Photon 三家同语义），
+// 解析端在 buffer 域做全额去抖（Kappa / Photon 同款；c13 取半抖换 AA，此处从 Kappa / Photon）。
+// 预处理 #if 不支持浮点比较，开关宏与数值常量分离
 #define TAAU
 #ifdef TAAU
-const float RENDER_SCALE = 0.75; // 渲染比例 S（0.75 → 像素成本 ×0.5625）；不取 ≤0.5——Halton 16 相位不足以覆盖稀疏目标像素网格（FSR2 低比例换 72 相位补）
-const float TAAU_UPSAMPLE_SHARPNESS = 0.5; // 当前帧上采样核锐度（与历史采样的 TAA_HISTORY_SHARPNESS 解耦；初值对齐 c13 2.0−S−S ≈ 0.5）
+const float RENDER_SCALE = 0.7; // 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.5 → ×0.25）；全额去抖 + 置信度门控 + 32 相位修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
+const float TAAU_UPSAMPLE_SHARPNESS = 1.0; // 当前帧上采样核锐度（与历史采样的 TAA_HISTORY_SHARPNESS 解耦）；c13 / Bliss 公式 2.0−S−S：S=0.75 → 0.5、S=0.5 → 1.0，改 RENDER_SCALE 时按此式同步
+const float TAAU_BLEND_BASE = 0.12; // TAAU 当前帧基础权重（c13 同值、原生档 0.05 的两倍余）：上采样帧是锐度与相位的唯一来源、偏低必糊；闪烁不靠压它防——由置信度门控与 Karis 防闪在稳定区把等效注入压到 ~0
+const float TAAU_CONFIDENCE_POWER = 2.0; // 上采样置信度指数（UE 最大核权重法）：采样位靠近纹素中心 ~1、纹素角点 ~0.32，指数后角点注入趋零、把插值过渡交给时间累积；Kappa 取 1 / Photon 取 5，取中
 #endif
 
 // ---- 光照（lib/lighting/lighting.glsl，直接光物理化——春雷 shading.glsl 同构）----
