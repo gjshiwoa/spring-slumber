@@ -104,10 +104,10 @@ vec3 clipHistoryToNeighborhood(vec3 historyColor, ivec2 pixel, float clipGamma, 
     vec3 aabbMin = mu - clipGamma * sigma;
     vec3 aabbMax = mu + clipGamma * sigma;
 
-    // Y 通道上界帽（tonemap 值域 [0,1)）：高对比边缘双峰统计的 μ+γσ 可越出 1，截到盒面的落点
-    // Y 会 > 1，逆变换分母 (1−Y) 变负、被 1e-5 地板钳住后放大 1e5 倍——物体边缘极亮爆闪的根源
-    aabbMax.x = min(aabbMax.x, TAA_TONEMAP_DOMAIN_MAX);
-
+    // 盒 Y 上界刻意不加帽：高亮 / 高对比邻域 μ+γσ 越出 1 属正常统计；clip 落点是 center(=μ) 与
+    // 历史 tonemap 值的凸组合、两端 Y 恒 < 1，落点 Y 不可能 ≥ 1、逆变换分母恒正（1e-5 地板只为
+    // Y→1⁻ 的极端亮部兜底）。加 0.995 之类上界帽会把工作域 luma ≳ 200 的亮部系统性压暗，且 Y
+    // 绑定时整向量向中心缩放、连 Co/Cg 一起拖走色相
     vec3 clipped = rgbToYCoCg(taaTonemap(historyColor));
     vec3 center = 0.5 * (aabbMax + aabbMin);
     vec3 extents = max(0.5 * (aabbMax - aabbMin), vec3(1e-5));

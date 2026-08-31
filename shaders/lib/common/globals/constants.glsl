@@ -152,7 +152,6 @@ const vec2 TAA_JITTER_SAMPLES[32] = vec2[32](
 const float TAA_HISTORY_SHARPNESS   = 0.65; // 历史 Catmull-Rom 锐化系数（春雷 0.6 / 春v2 低配版 0.8 之间）
 const float TAA_CLIP_GAMMA          = 1.5;  // 方差钳制 γ 基础值（深度置信度高时用）；十字 5-tap 统计较 3×3 盒略粗，γ 抬一档补偿
 const float TAA_CLIP_GAMMA_MAX      = 2.25; // 深度置信度低时的放宽上限（防鬼影，春雷自适应同思路）
-const float TAA_TONEMAP_DOMAIN_MAX  = 0.995; // 钳制盒 Y 通道上界帽：高对比边缘 μ+γσ 可越出 1，落点 Y>1 会使逆变换分母变负被地板放大 1e5 倍（边缘极亮爆闪）；0.995 对应工作域 luma ~200 无损
 const float TAA_CLIP_DISTANCE_GAIN  = 5.0;  // Karis 距离防闪增益（Kappa / Photon 同式同值）：历史稳居钳制盒内时把当前帧权重压向 0——恒定注入相位漂移的当前帧样本是静止细节闪烁的主源；工作域已含曝光归一化，距离不再乘曝光
 const float TAA_OFFCENTER_REJECTION = 0.25; // 偏心拒绝强度（Zombye，Kappa / Photon / c13 同族 0.25）：重投影落点偏离纹素中心（=有运动）时按比例抬高当前帧权重，削运动拖影 / 运动糊
 const float TAA_BLEND_BASE          = 0.05; // 当前帧基础权重（历史权重 0.95；原生档专用，TAAU 见 TAAU_BLEND_BASE）
@@ -173,7 +172,7 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离
 #define TAAU
 #ifdef TAAU
-const float RENDER_SCALE = 0.7; // 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.5 → ×0.25）；全额去抖 + 置信度门控 + 32 相位修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
+const float RENDER_SCALE = 0.75; // 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.5 → ×0.25）；全额去抖 + 置信度门控 + 32 相位修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
 const float TAAU_UPSAMPLE_SHARPNESS = 1.0; // 当前帧上采样核锐度（与历史采样的 TAA_HISTORY_SHARPNESS 解耦）；c13 / Bliss 公式 2.0−S−S：S=0.75 → 0.5、S=0.5 → 1.0，改 RENDER_SCALE 时按此式同步
 const float TAAU_BLEND_BASE = 0.12; // TAAU 当前帧基础权重（c13 同值、原生档 0.05 的两倍余）：上采样帧是锐度与相位的唯一来源、偏低必糊；闪烁不靠压它防——由置信度门控与 Karis 防闪在稳定区把等效注入压到 ~0
 const float TAAU_CONFIDENCE_POWER = 2.0; // 上采样置信度指数（UE 最大核权重法）：采样位靠近纹素中心 ~1、纹素角点 ~0.32，指数后角点注入趋零、把插值过渡交给时间累积；Kappa 取 1 / Photon 取 5，取中
