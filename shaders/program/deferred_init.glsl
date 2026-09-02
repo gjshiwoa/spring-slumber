@@ -86,12 +86,13 @@ void main() {
         vec3 viewPos = screenToView(vec3(uv, depth));
         color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance, sssStrength);
 
-        // ---- 调试：植被标记可视化（验证 gsh 程序化判定；块注释停用，恢复时去掉 /* 与 */ 两行）----
-        // 命中植被时整像素覆盖为红（标记为 8bit 精确往返（251/255 → 251 → 251/255），
-        // 半 8bit 容差比较防边缘抖动）
+        // ---- 调试：物品标记可视化（红 = 植被（gsh 程序化判定）、绿 = 显式排除（block.properties →
+        // MATERIAL_SOLID，如草方块）、原色 = 未标记；块注释停用，恢复时去掉 /* 与 */ 两行）----
         /*
         if (sssStrength > 0.0) {
             color = vec3(1.0, 0.0, 0.0);
+        } else if (abs(gAlbedo.a - MATERIAL_SOLID) < 0.5 / 255.0) {
+            color = vec3(0.0, 1.0, 0.0);
         }
         */
     }

@@ -148,8 +148,10 @@ void main() {
 #ifdef STAGE_VERTEX
 
 // block.properties 自定义方块 ID（x 分量，未定义方块 = -1；y 为渲染类型）：仅 terrain 等地形类入口
-// 有引擎填充，block / hand 入口未绑定、取默认 0——不命中任何 BLOCK_* 常量，标记回落 MATERIAL_NONE
-in vec2 mc_Entity;
+// 有引擎填充，block / hand 入口未绑定、取默认 0——不命中任何 BLOCK_* 常量，标记回落 MATERIAL_NONE。
+// 声明取 vec4 通用形式（OptiFine 官方模板同型，z/w 不消费）——vec2 为 Iris 文档写法，老 OptiFine
+// 的属性绑定对声明类型较挑剔，vec4 两家加载器通吃
+in vec4 mc_Entity;
 
 void main() {
     gl_Position = applyTAAJitter(ftransform()); // TAA 亚像素抖动，composite_taa 统一解析
