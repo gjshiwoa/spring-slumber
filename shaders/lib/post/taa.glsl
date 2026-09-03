@@ -12,10 +12,11 @@
 // 换算为渲染域（见函数内注释），当前帧 catmullRom5 上采样做半抖去抖（c13 / Kappa / Photon 三家一致）
 // 后与全屏历史混合恢复全屏；混合链 = 基础权重 → 上采样置信度门控（UE 最大核权重法）→
 // Karis 距离防闪（稳定区等效注入压到 ~0）→ 偏心拒绝（运动中抬当前帧），S=1 时编译期逐位退化为
-// 纯 TAA。性能：锚点位置单次重建、prevDepth 随
-// catmullRom5 a 通道一趟带回、采样全
-// textureLod 0；统计与深度扫描均十字 5-tap（不含对角，c13 / Photon 同款取舍），最坏 16 fetch
-//（TAAU 20），换来整段像素成本 ×S²
+// 纯 TAA。性能：锚点位置单次重建、采样全 textureLod 0；统计与深度扫描均十字 5-tap（不含对角，
+// c13 / Photon 同款取舍）；历史深度独立最近采样（catmull 负瓣过冲不可信，见 resolveTAA 内注释）。
+// fetch 预算：几何最坏 TAAU 21 / 原生 17；天空像素当前帧上采样与历史双降 bilinear（各 5→1）后
+// 两档均 13——天空是 sky-view LUT 双线性平滑场、锐化无负载（依据见 resolveTAA 内注释），
+// 换来整段几何像素成本 ×S²
 // 依赖先行 include：constants.glsl（TAA_*）、uniforms.glsl（colortex0/3、depthtex0、视口、
 // cameraPosition 系与 previous 系矩阵）、utils/color.glsl、filters.glsl（catmullRom5）、
 // utils/space.glsl（screenToView / viewToRelativeWorld / relativeWorldToPreviousScreen /
@@ -71,12 +72,14 @@ float taaLuma(vec3 color) {
     return rgbToYCoCg(color).x;
 }
 
+// tonemap 族除法写 rcp × mul 形式：vec/标量 N 次 div → 1 次 rcp + N 次 mul（低配 GPU div 吞吐约
+// mul 的 1/4，fp32 下 ulp 级差异不可感）——统计 / 钳制段每像素经本族约 7 次，属真实热路径
 vec3 taaTonemap(vec3 color) {
-    return color / (1.0 + taaLuma(color));
+    return color * (1.0 / (1.0 + taaLuma(color)));
 }
 
 vec3 taaInverseTonemap(vec3 color) {
-    return color / max(1.0 - taaLuma(color), 1e-5);
+    return color * (1.0 / max(1.0 - taaLuma(color), 1e-5));
 }
 
 // 历史钳制：十字 5-tap（中心 + 上下左右）当前帧统计 μ / σ 并取样本极值，历史超出「μ±γσ ∩
@@ -172,6 +175,8 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     ivec2 renderRes = ivec2(viewWidth, viewHeight);
     ivec2 renderPixel = pixel;
 #endif
+    // 曝光倒数一次算好：两处除回归一化共用（vsh 已把 exposure 钳到 (1e-4, 1e4)，取倒数安全）
+    float invExposure = 1.0 / exposure;
 
     // 天空（closest.z >= 1：十字全空）不早退、与几何同路径时间累积（32 相位采样解析成亚像素抗锯齿，
     // 消除大气地平线高频边界锯齿）；重投影切换无穷远方向仅旋转链、锚点线性深度取哨兵（同一条置信
@@ -189,19 +194,40 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     // 注意半抖的正确写法是补偿加在 uv·S **之后**——旧式 (uv + jitterUV·0.5)·S 把补偿一并乘了 S，
     // S=0.5 时只剩全额的 1/4、每帧系统性错位。catmullRom5 的 texSize 传**纹理真实尺寸**
     //（viewWidth/Height——函数内部 position = uv×texSize 定位纹素；误传渲染分辨率会退化为全屏域
-    // 恒等映射采到子区域外旧帧残留）；钳进子区域边缘 0.25 buffer texel——左 / 下缘即缓冲边缘，
-    // 核半径 2 texel 的越界 tap 由引擎 clamp-to-edge 兜底（与 S=1 同款），右 / 上缘越界 tap 落进
-    // 缓冲内上帧 TAA 残留（同视场位置、内容≈本帧）。余量刻意小：最左列目标像素的采样位低至
-    // 0.25·S ≈ 0.19 buffer texel，边距 0.75 会让该列恒触底钳、相位压成定点失去时间抗锯齿
+    // 恒等映射采到子区域外旧帧残留）。钳制边界**不对称**（上界以 renderResF 计——其 round 已对齐
+    // quad 光栅实际覆盖，即本帧写入区的精确纹素数）：
+    //   下界 0.25 texel：左 / 下缘即缓冲物理边缘，越界 tap 由引擎 clamp-to-edge 重复纹素 0（本帧
+    //   有效内容）兜底；余量刻意小保住屏幕左 / 下缘列的逐帧 jitter 相位（时间抗锯齿）
+    //   上界内缩 2.5 texel：catmullRom5 外侧 tap 达 centerPosition+2（核半径 2），采样中心离子区域
+    //   右 / 上缘不足 2.5 texel 时必有 tap 越过本帧写入区。子区域外的 colortex0 是上帧 composite_taa
+    //   的**全屏输出**——该缓冲坐标同时是目标域 uv≈S，内容对应源场景 S²≈0.49 FOV 处，与边缘的
+    //   真实视场（源 uv≈S）完全是两处画面：越界 tap 读到「别处的画面」，静止时贴边一条固定异色
+    //   细线、运动时逐帧错位成一行 / 列白边（右 / 上缘独有；左 / 下缘贴缓冲边无此问题，TAAU 关闭
+    //   即消失，实测）。天空 bilinear 半径 0.5 同被覆盖。代价：最外 ~2.5/S ≈ 3.6 目标像素采样相位
+    //   定点冻结，屏幕物理边缘处不可见
 #ifdef TAAU
     vec2 upsampleUV = clamp(uv * RENDER_SCALE + jitterUV * 0.5,
                             0.25 / vec2(viewWidth, viewHeight),
-                            RENDER_SCALE - 0.25 / vec2(viewWidth, viewHeight));
-    vec3 currentColor = catmullRom5(colortex0, upsampleUV,
-                                    vec2(viewWidth, viewHeight),
-                                    TAAU_UPSAMPLE_SHARPNESS).rgb * exposure;
-    // 与上采样核同源的置信度（角点 ~0.32 / 中心 1），供混合链门控
-    float upsampleConfidence = catmullConfidence(fract(upsampleUV * vec2(viewWidth, viewHeight) - 0.5));
+                            (renderResF - 2.5) / vec2(viewWidth, viewHeight));
+    // 采样相位与 catmullRom5 内部 f 代数恒等（f = position − centerPosition = fract(position − 0.5)），
+    // 先算一次供置信度共用
+    vec2 upsamplePhase = fract(upsampleUV * vec2(viewWidth, viewHeight) - 0.5);
+    // 天空像素降 bilinear（5→1 fetch）：天空是 200×200 sky-view LUT 双线性采样的平滑场（无日月
+    // 星盘 / 云），catmull 锐化在平滑场上无负载——时间累积本就负责抹平 LUT facets；静止天空经
+    // Karis 门控 blend→0、输出由历史主导，bilinear 的收敛期 / 运动期差异不可见；地平线边缘因
+    // jitter 在天空 / 几何间翻转的像素由最近片元锚点膨胀落几何路径（上方 isSky 判定吃十字），
+    // 锐度关键带不受影响
+    vec3 currentColor;
+    if (isSky) {
+        currentColor = textureLod(colortex0, upsampleUV, 0.0).rgb * exposure;
+    } else {
+        currentColor = catmullRom5(colortex0, upsampleUV,
+                                   vec2(viewWidth, viewHeight),
+                                   TAAU_UPSAMPLE_SHARPNESS).rgb * exposure;
+    }
+    // 与上采样核同源的置信度（角点 ~0.32 / 中心 1），供混合链门控；置信度只描述采样相位离纹素
+    // 中心的远近、与滤波核无关，天空 bilinear 路径同样适用
+    float upsampleConfidence = catmullConfidence(upsamplePhase);
 #else
     // 原生档半 jitter 补偿（c13 / 春雷同款）：几何 +jitter 后像素含 center+j 处场景，采样向 jitter
     // 方向偏一半——抗锯齿收敛与锐度折中
@@ -227,18 +253,26 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     // 屏幕外或首帧时直接采用当前帧，避免无意义的历史采样与边界 clamp。
     bool offscreen = any(lessThan(historyUv, vec2(0.0))) || any(greaterThan(historyUv, vec2(1.0)));
     if (offscreen || frameCounter == 0) {
-        return max(currentColor / exposure, vec3(0.0));
+        return max(currentColor * invExposure, vec3(0.0));
     }
 
-    // 解遮挡置信：颜色历史使用 Catmull-Rom，但深度必须独立最近采样。
-    // Catmull-Rom 的负权重会让天空哨兵值 / 几何深度在边缘过冲，不能把 history.a 当真实深度。
+    // 解遮挡置信：深度必须独立最近采样——几何历史虽是 Catmull-Rom，其负权重仍会让天空哨兵值 /
+    // 几何深度在边缘过冲，不能把 history.a 当真实深度（天空 bilinear 同理不做深度载体）。
     ivec2 resolution = ivec2(viewWidth, viewHeight);
     ivec2 historyPixel = clamp(ivec2(historyUv * vec2(viewWidth, viewHeight)), ivec2(0), resolution - 1);
     float historyDepth = texelFetch(colortex3, historyPixel, 0).a;
     bool historySky = historyDepth >= TAA_DEPTH_SENTINEL * 0.999;
 
     float velocityPx = length(velocity * vec2(viewWidth, viewHeight));
-    vec4 history = catmullRom5(colortex3, historyUv, vec2(viewWidth, viewHeight), TAA_HISTORY_SHARPNESS);
+    // 天空历史同样降 bilinear（5→1 fetch）：历史天空是时间累积的平滑场，catmull 锐化无负载、
+    // 负瓣过冲在平滑场上只剩 ring 风险；几何路径维持 catmull 锐化（细节保真 / 运动清晰度关键）。
+    // rgb 直取 vec3——深度置信走上方独立最近采样，不消费 a 通道
+    vec3 historyColor;
+    if (isSky) {
+        historyColor = textureLod(colortex3, historyUv, 0.0).rgb;
+    } else {
+        historyColor = catmullRom5(colortex3, historyUv, vec2(viewWidth, viewHeight), TAA_HISTORY_SHARPNESS).rgb;
+    }
     float depthConf;
     if (isSky != historySky) {
         depthConf = 0.0;
@@ -251,7 +285,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     // 方差钳制；置信度低时放宽 γ 防鬼影（春雷自适应同思路）；历史 rgb 乘曝光进工作域（a 为深度不乘）
     float clipDistance;
     float clipGamma = mix(TAA_CLIP_GAMMA_MAX, TAA_CLIP_GAMMA, depthConf);
-    vec3 historyWorking = clipHistoryToNeighborhood(history.rgb * exposure, renderPixel, clipGamma, exposure, renderRes, clipDistance);
+    vec3 historyWorking = clipHistoryToNeighborhood(historyColor * exposure, renderPixel, clipGamma, exposure, renderRes, clipDistance);
 
     // 当前帧权重混合链（顺序参照 Photon：地板先立、门控后压，门控允许压破地板）：
     // ① 基础 + 运动收敛 + 解遮挡收敛（春v2 低配版公式）——TAAU 基础与原生档同取 0.05（Kappa 同值）：
@@ -283,7 +317,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     blend = 1.0 - (1.0 - blend) * offcenterFactor;
 
     // 除回归一化曝光：输出与历史存储均回到未曝光的线性域（曝光由 final 统一应用）
-    return max(mix(historyWorking, currentColor, blend) / exposure, vec3(0.0));
+    return max(mix(historyWorking, currentColor, blend) * invExposure, vec3(0.0));
 }
 
 #endif
