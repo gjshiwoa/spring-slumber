@@ -28,13 +28,14 @@
 - **lib 文件之间不互相 include（无嵌套）**：依赖由 program 按需平铺引入；`constants.glsl` 须在 `pipeline/gbuffer_data.glsl` 之前（`remapLightmap` 依赖常量）；`sky.glsl` / `lighting.glsl` 等所需的 uniforms / 常量同样由接入方先行 include（各 lib 文件头注明依赖）
 - 标识符避开 GLSL 保留字（`packed` / `filter` / `sample` / `input` / `output` 等）；采样纹理统一命名 `tex`
 - program 文件 fsh 在前、vsh 在后，`#ifdef STAGE_FRAGMENT` / `#ifdef STAGE_VERTEX` 分隔；带 gsh 的 program 另加 `#ifdef STAGE_GEOMETRY` 段（见「物品标记」）；使用通用全屏 vsh 的 program 无 vsh 段
+- **pass（program / 入口）文件内不定义函数**：可复用或非平凡的逻辑写进对应 lib 文件（新 lib 文件须在「lib 一览」登记、头注注明依赖），一次性小段逻辑直接内联在 `main()` 里；pass 文件里的函数体只有 `main`
 - fsh 段必须含 `/* DRAWBUFFERS:... */` 注释（引擎在 include 展开后扫描），独占一行、前后不得有其他注释；多入口共享 program 且输出不同时（`composite_bloom_upsample`：composite9~11 写 `1`、composite12 写 `17`）DRAWBUFFERS 下放到入口文件；输出用 `layout(location = N)` 显式绑定，location 按 DRAWBUFFERS 顺序。常规取值：gbuffer 类 `45`、手动合成类 `4`、deferred / composite / post-deferred 类 `0`（`composite_taa` 兼写 `03`、composite12 入口兼写 `17` 由 `#if BLOOM_LEVEL == 0` 门控）、shadow 阶段 `0`（= shadowcolor0）
 
 ### gbuffer 打包与物品标记
 
 - 春雷式位打包（`pack4x8To2x16`）：colortex4.rg = albedo RGBA、colortex4.ba = 高光贴图 RGBA（labPBR）、colortex5.rg = 八面体观察空间法线、colortex5.ba = 原始 lmcoord（重映射 `remapLightmap` 移到读取端）
 - **物品标记占 albedo 的 a 通道**（texcolor 的 a 在 cutout 判定后职责已尽，8bit 槽位复用；读取端 `unpack2x16To4x8(...).a × 255` 判定）：`MATERIAL_NONE` = 0 / `MATERIAL_VEGETATION` = 251 / `MATERIAL_SOLID` = 252（显式排除，SSS 取 0；253~255 预留）。当前唯一显式映射：草方块 `shaders/block.properties` 定义 `block.10001=minecraft:grass_block`，ID 与 constants.glsl 的 `BLOCK_GRASS_BLOCK` **成对维护、两端同步**
-- 植被为 **terrain 入口专属 gsh 程序化判定**（春雷 `isLikelyPlantTriangle`：三角形几何法线「垂直交叉面片」× 顶点色「生物群系染色」chroma 两信号取或），按 per-triangle 分类经 flat varying `vMaterialID` 下传、fsh 写入 a 通道；vsh 先经 `mc_Entity.x` 写显式标记（草方块 → `MATERIAL_SOLID`，压制其染色顶面误报；block / hand 入口 mc_Entity 无引擎填充、回落空标记），gsh 仅空标记时兜底
+- 植被为 **terrain 入口专属 gsh 程序化判定**（春雷 `isLikelyPlantTriangle`，函数在 `lib/common/pipeline/material.glsl`：三角形几何法线「垂直交叉面片」× 顶点色「生物群系染色」chroma 两信号取或），按 per-triangle 分类经 flat varying `vMaterialID` 下传、fsh 写入 a 通道；vsh 先经 `mc_Entity.x` 写显式标记（草方块 → `MATERIAL_SOLID`，压制其染色顶面误报；block / hand 入口 mc_Entity 无引擎填充、回落空标记），gsh 仅空标记时兜底
 - gsh 挂接机制（GLSL 单命名空间、in/out 不得同名）：terrain 入口额外定义 `OPAQUE_GSH`，program vsh 编译侧据此把输出 varying 挂 `vGsh` 前缀给 gsh、gsh 输出还原原名衔接 fsh；block / hand 不定义该宏、无 gsh，vsh 原名直连零成本
 - texcolor 经半透明混合的程序（entityColor 的 entities、手动合成的 beacon 外壳 / color / color_textured）混合只作用 rgb，**标记不参与混合、a 通道整像素置 `MATERIAL_NONE`**；不写 colortex4/5 的 pass 与标记无关
 
@@ -142,6 +143,7 @@
 **lib/common/pipeline/**
 
 - `varying_io.glsl`：`VARYING` 宏
+- `material.glsl`：gbuffer 写入侧材质判定——`isLikelyPlantTriangle`（三顶点观察空间位置 + 顶点色 → 是否疑似植被，terrain gsh 消费）。依赖 constants / uniforms / space
 - `gbuffer_data.glsl`：读取端工具——`remapLightmap` 光照图重映射、`materialSSSStrength`（colortex4 albedo a 通道标记 → [0,1] SSS 强度，半 8bit 容差比较；植被取 `VEGETATION_SSS_STRENGTH`、`MATERIAL_SOLID` 与未标记取 0、253~255 预留时在此定档）；colortex4/5 解包读取按需在此扩展
 
 **lib/common/utils/**（函数级复用）

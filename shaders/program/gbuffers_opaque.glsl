@@ -14,6 +14,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
+#include "/lib/common/pipeline/material.glsl"
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/utils/noise.glsl"
 
@@ -79,11 +80,7 @@ void main() {
 
 // ================================ GEOMETRY ================================
 #ifdef STAGE_GEOMETRY
-// 植被程序化判定（仅 terrain 入口挂接）。春雷 isLikelyPlantTriangle 判据，两信号取或——
-// 染色信号对草方块顶面等染色几何误报，由 vsh 的 block.properties 显式标记压制：
-//   垂直交叉面片：三角形几何法线近水平（面片垂直地面）且 xz 分量对角——原版草 / 花 / 苗的
-//     十字交叉模型两两正交再整体斜置 45°，法线落在对角方向
-//   生物群系染色：三顶点平均顶点色 chroma 偏大——草 / 树叶带绿色 tint，未染色几何近灰
+// 植被程序化判定（仅 terrain 入口挂接，判据函数在 lib/common/pipeline/material.glsl）：
 // 按三角形整体分类、经 flat varying 下传，fsh 写入 albedo a 通道
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 3) out;
@@ -100,33 +97,10 @@ out vec2 vLmcoord;
 out vec3 vViewPos;
 flat out float vMaterialID;
 
-bool isLikelyPlantTriangle() {
-    // 三角形两邻边差向量旋转到世界轴向（viewToWorldDirection 纯旋转，平移对差向量无效）
-    vec3 edge0 = viewToWorldDirection(vGshViewPos[1] - vGshViewPos[0]);
-    vec3 edge1 = viewToWorldDirection(vGshViewPos[2] - vGshViewPos[0]);
-    vec3 geometricNormal = cross(edge0, edge1);
-    float areaSquared = dot(geometricNormal, geometricNormal);
-    if (areaSquared < 1e-8) return false; // 退化三角形（零面积）
-    geometricNormal *= inversesqrt(areaSquared);
-
-    vec2 horizontalNormal = abs(geometricNormal.xz);
-    float diagonalness = min(horizontalNormal.x, horizontalNormal.y)
-                       / max(max(horizontalNormal.x, horizontalNormal.y), 1e-5);
-    bool verticalCrossPanel = abs(geometricNormal.y) < PLANT_PANEL_MAX_Y
-                           && diagonalness > PLANT_PANEL_DIAGONAL;
-
-    vec3 averageColor = (vGshColor[0].rgb + vGshColor[1].rgb + vGshColor[2].rgb) / 3.0;
-    float colorChroma = max(averageColor.r, max(averageColor.g, averageColor.b))
-                      - min(averageColor.r, min(averageColor.g, averageColor.b));
-    bool tinted = colorChroma > PLANT_TINT_CHROMA_MIN;
-
-    return verticalCrossPanel || tinted;
-}
-
 void main() {
     // vsh 经 mc_Entity / block.properties 写入显式标记、gsh 仅空标记时程序化兜底（春雷同构）
     float primitiveMarker = vGshMaterialID[0];
-    if (primitiveMarker < 0.5 && isLikelyPlantTriangle()) {
+    if (primitiveMarker < 0.5 && isLikelyPlantTriangle(vGshViewPos, vGshColor)) {
         primitiveMarker = MATERIAL_VEGETATION;
     }
 
