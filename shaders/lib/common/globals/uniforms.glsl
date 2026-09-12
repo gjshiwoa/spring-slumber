@@ -21,13 +21,16 @@ uniform vec4 entityColor; // 实体着色（受伤红闪等），rgb 为目标�
 
 uniform float viewWidth;  // 视口宽度（像素）；lib/post/bloom.glsl 计算 colortex0 源纹素尺寸
 uniform float viewHeight; // 视口高度（像素）；同上
+uniform float far;        // 相机远平面（≈ 渲染半径 × √2 + 余量）：屏幕空间追踪阴影的渲染边界淡出锚点（shadow.glsl；GLSL 330 非保留字，各参考包通用名）
 uniform float frameTime;  // 帧间隔（秒）；自动曝光时间适应
+uniform float frameTimeCounter; // 游戏时间累计（秒，世界加载起算）；云层风场动画时基（lib/atmosphere/clouds.glsl）
 uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 31）与首帧守卫
 
 // ---- TAA 重投影（lib/common/utils/noise.glsl + lib/post/taa.glsl + utils/space.glsl 上一帧换算）----
 uniform vec3 cameraPosition;         // 本帧相机世界坐标
 uniform vec3 previousCameraPosition; // 上帧相机世界坐标
-uniform mat4 gbufferProjectionInverse;  // 裁剪 -> 视图（当前帧）：TAA 深度重建
+uniform mat4 gbufferProjection;         // 视图 -> 裁剪（当前帧，正向投影）：屏幕空间追踪阴影的每步射线投影（shadow.glsl）
+uniform mat4 gbufferProjectionInverse;  // 裁剪 -> 视图（当前帧）：TAA 深度重建；屏幕空间追踪阴影的场景点重建共用
 uniform mat4 gbufferPreviousModelView;  // 视图 -> 世界（上帧）：TAA 重投影
 uniform mat4 gbufferPreviousProjection; // 世界 -> 裁剪（上帧）：TAA 重投影
 

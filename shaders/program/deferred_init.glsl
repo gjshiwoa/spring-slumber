@@ -6,8 +6,9 @@
 // 天空与深度缓冲几何在地平线边界像素内衔接一致、阴影贴图采样位置逐帧对齐，composite_taa 时间
 // 累积平滑 LUT 双线性 facets 与地平线边界
 // 天空像素（depthtex1 >= 1——纯不透明深度，depthtex0 此刻可能已混入粒子深度）采样 colortex7
-// sky-view LUT；天空在本 pass 进 colortex0 是时序关键——之后半透明引擎混合才有正确天空背景，
-// 画在 composite（半透明之后）则水面叠天空处混到黑底
+// sky-view LUT，随后叠加 2D 平面云（lib/atmosphere/clouds.glsl：LUT 是纯方向函数、云有平移视差
+// 故不进 LUT；预乘合成 cloud.rgb + 天空 × cloud.a）；天空在本 pass 进 colortex0 是时序关键——
+// 之后半透明引擎混合才有正确天空背景（含云），画在 composite（半透明之后）则水面叠天空处混到黑底
 // colortex0 自此全程线性（final 的 linearToSrgb 是唯一离开线性空间的位置）
 // 几何像素：解包 colortex4/5（albedo / 八面体法线 / lmcoord 重映射）+ 去抖 uv 重建 viewPos 后经
 // shadeSurface 着色（直接光 = 阴影可见性 × 直射透射率 × 辐照度 × wrap 余弦 + 环境 / 方块光，
@@ -26,8 +27,12 @@
 #include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
+#ifdef CLOUDS_2D
+#define FULLSCREEN_CLOUD_TRANSMITTANCE // 云高处透射率 varying（CLOUDS_2D 在 constants.glsl——宏门控须在其后；atmosphere.glsl 已于上方引入）
+#endif
 #include "/program/fullscreen_vsh.glsl"
 #include "/lib/atmosphere/sky.glsl"
+#include "/lib/atmosphere/clouds.glsl"
 #include "/lib/lighting/shadow.glsl"
 #ifdef STAGE_FRAGMENT
 // 通用全屏 vsh 输出的帧数据——按需 in 声明；须位于 lighting.glsl 之前（shadeSurface 直接引用
@@ -38,6 +43,9 @@ in vec3 vMoonDirection;
 in vec3 vLightDirection;
 in vec3 vDirectIrradiance;
 in vec3 vDirectTransmittance;
+#ifdef CLOUDS_2D
+in vec3 vCloudTransmittance;
+#endif
 in vec3 vSkyAmbient;
 in vec3 vHorizon;
 flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁器 / 部分驱动所容）
@@ -68,11 +76,18 @@ void main() {
 
     vec3 color;
     if (depth >= 1.0) {
-        // 天空视线：z = 1 落在远平面（不归一化，getSkyColor 内部归一）；LUT 为 composite12 上帧
-        // 生成（滞后一帧无视觉差异），非活动半区由 getSkyColor 门控跳过、有效性取 vsh 探针
-        //（无效即首帧 / 缓冲重建，回退轻量天空）
-        color = getSkyColor(screenToView(vec3(uv, 1.0)),
-                            vSunDirection, vMoonDirection, vHorizon, vSkyLutValid > 0.5);
+        // 天空视线：z = 1 落在远平面（不归一化，getSkyColor / getPlanarClouds 内部归一）；LUT 为
+        // composite12 上帧生成（滞后一帧无视觉差异），非活动半区由 getSkyColor 门控跳过、有效性取
+        // vsh 探针（无效即首帧 / 缓冲重建，回退轻量天空）
+        vec3 skyDirView = screenToView(vec3(uv, 1.0));
+        color = getSkyColor(skyDirView, vSunDirection, vMoonDirection, vHorizon, vSkyLutValid > 0.5);
+#ifdef CLOUDS_2D
+        // 2D 平面云叠加（预乘合成）：地形像素不进本分支、遮挡天然正确；云不写深度，TAA 按天空
+        // 路径处理（纯旋转链重投影），TAAU 档与天空同路径上采样
+        vec4 cloud = getPlanarClouds(skyDirView, vLightDirection,
+                                     vDirectIrradiance, vCloudTransmittance, vSkyAmbient);
+        color = cloud.rgb + color * cloud.a;
+#endif
     } else {
         // 几何光照：colortex4.rg 解包 albedo（sRGB 反 gamma；a 通道为标记位），colortex5.rg 八面体
         // 法线、.ba 原始 lmcoord 重映射；viewPos = 去抖 uv + 本像素原始深度

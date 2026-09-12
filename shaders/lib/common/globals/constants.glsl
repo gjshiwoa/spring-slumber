@@ -80,6 +80,33 @@ const int   SKY_MS_QUAD_BANDS    = 8;   // 球面求积环带数（Δcosθ 等�
 const int   SKY_MS_QUAD_AZIMUTHS = 6;   // 每环带方位节点数（带间黄金角错位防与光源几何对齐）；× BANDS = 48 节点
 const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测 ≤ ~0.30，防极端海拔撑爆几何级数分母）
 
+// ---- 云（2D 平面云，lib/atmosphere/clouds.glsl；方案移植自春v2 clouds2D，2D 云原作者 Coldnight冷夜）----
+// 单层解析云：云壳求交（与大气共用 EARTH_RADIUS）+ 角坐标 6 octave simplex fbm（各 octave 差速
+// 演变）+ Klein-Nishina 前向散射相位照明，alpha = 密度 × 距离衰减；画在 deferred_init 天空分支
+//（TAA 之前）。常量名对齐春v2 便于对照调参（多数同值，差异处注明「本包适配」）；光照全部来自
+// 通用全屏 vsh 帧数据 varying——昼夜切换黑过渡 / 雨天直射 ×0.25 / 环境去饱和自动跟进。
+// 开关宏与数值常量分离（预处理 #if 不支持浮点比较，TAAU 同款纪律）
+#define CLOUDS_2D
+#ifdef CLOUDS_2D
+const float CLOUDS_2D_HEIGHT        = 8000.0;  // 云层海拔（米，春v2 同值）：高处大片层云观感 + 角坐标数值域有界；与 vCloudTransmittance 半径共用（同一常量）
+const float CLOUDS_2D_COVERAGE      = 0.55;    // 覆盖率（春v2 0.45、按反馈上调）：coverage 重映射阈值，抬 = 云更多更整片
+const float CLOUDS_2D_COVERAGE_RAIN = 0.85;    // 雨天覆盖率（本包适配：春v2 雨天只减密度、阴天感由其体素云层承担，本包无底层故抬 coverage 成阴天）
+const float CLOUDS_2D_DENSITY       = 1.0;     // 密度直乘（春v2 同值）：alpha = 密度 × 距离衰减的不透明度主旋钮
+const float CLOUDS_2D_RAIN_FADE     = 0.66;    // 雨天密度衰减（春v2 同值）：阴天变薄云
+const float CLOUDS_2D_SCALE         = 300.0;   // 噪声角域频率（春v2 同值）：一个噪声周期 ≈ 云壳半径 / 300 ≈ 21 km，一团云 ≈ 半周期
+const float CLOUDS_2D_SPEED         = 0.01;    // 噪声域时间速度（春v2 同值）：低频层平移 + 各 octave ×1.1 差速——云在漂移之外持续自演变
+const float CLOUDS_2D_PHASE_G       = 0.25;    // KN 相位前向不对称度（春v2 同值）：银边强度与集中度的权衡
+const float CLOUDS_2D_PHASE_E       = 1.879;   // KN 相位 e 参数（本包优化）：由 PHASE_G 经牛顿迭代离线解出（残差方程 1/e − 2/ln(2e+1) + 1 = g，g = 0.25 → e ≈ 1.879）——与 PHASE_G 成对维护、改 g 须重解；春v2 逐像素 8 次迭代运行时求解，折叠后免 9 次超越函数
+const float CLOUDS_2D_PHASE_LOGTERM = 1.560;   // ln(2e+1)（本包优化）：同上离线解出、与 PHASE_E 成对
+const float CLOUDS_2D_LIGHT_DRIFT   = 4000.0;  // 伪自阴影的光源侧偏移距离（米，本包扩展）：相对噪声周期（云壳半径 / SCALE ≈ 21 km）取数 km——偏移落在云边缘另一侧才有明暗差；sunPathRotation −30° 下正午仰角 ≈ 60°、水平投影 ≈ 0.5，调制减弱而非消失（仅太阳真正近天顶才趋零）
+const float CLOUDS_2D_SHADOW_GAIN   = 3.5;     // 密度差 → 明暗映射增益（本包扩展）：大 = 边缘阴影更锐；差分降配到低频场后调制略趋平滑，嫌淡先抬此值
+const float CLOUDS_2D_SHADOW_STRENGTH = 0.45;  // 伪自阴影幅度（本包扩展）：直射项 × [1−S, 1+S]——0.35 偏淡 / 0.6 偏重，0.45 折中档；0 = 关闭
+const int   CLOUDS_2D_SHADOW_OCTAVES = 3;      // 伪自阴影偏移重采样的 octave 数（本包优化）：主采样 fbm 同循环累出同场低频 partial、偏移采样只求值前 N 个 octave + 复用主 worley warp 位移——两测同场差分无偏；6 = octave 与主采样同配（warp 仍为复用，与逐点独立 warp 不完全等价）
+const float CLOUDS_2D_SKY_MIX       = 0.2;     // 光照的天空环境占比（春v2 同值；春v2 兼作层合成强度，本包无体素云底层、整层全强度合成，此常量只管光照混合）
+const float CLOUDS_2D_FADE_DISTANCE = 24000.0; // 距离衰减 exp 尾长（米，春v2 同值）：地平线云溶进大气亮带的收口
+const float CLOUDS_2D_BRIGHTNESS    = 1.25;    // 云亮度（春v2 取 3.5 按其 sunColor 量级；本包直射辐照度 ≈ 236、白地形 E/π ≈ 75，取 1.25 → 正午云 ≈ 100~150 略亮于白地形、AgX 滚落；进游戏按观感微调）
+#endif
+
 // ---- 信标光柱（gbuffers_beacon，春雷同值）----
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
 const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写入 specular.a，labPBR emissive）
@@ -163,7 +190,7 @@ const float TAA_BLEND_MOTION        = 0.012; // 每像素速度的当前帧权�
 const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 深度置信失效（解遮挡）时的当前帧权重增量
 const float TAA_BLEND_MIN           = 0.02; // 当前帧权重下限（历史权重上限 0.98）；置信度 / Karis 防闪在其后施加、允许压破下限（下限防的是「无信息时不信任历史」，防闪是「有信息时明确信任历史」）
 const float TAA_BLEND_HAND_MIN      = 0.1;  // 手部当前帧权重下限（防手部拖影）
-const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）
+const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）：TAA 手部路径判定 + 屏幕空间追踪阴影的遮挡者排除（shadow.glsl）——两处消费者成对维护
 const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与天空像素哨兵——天空↔天空 |Δ|=0 满置信、天空↔几何自然归零（置信公式免分支）
 const float TAA_DEPTH_CONF_EDGE0    = 0.02; // 深度置信 smoothstep 下沿（重投影深度 vs 历史 a 通道的相对差）
 const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
@@ -241,5 +268,30 @@ const float SHADOW_RADIUS_BASE    = 0.25;   // 基础软半径（texel）
 const float SHADOW_RADIUS_DIST    = 2.0;   // 随相机距离增长的半径上限（texel）
 const float SHADOW_BIAS_NORMAL    = 0.05;  // normal offset 基数（世界单位，随距离 / 坡度放大，春v2 同思路）
 const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（进游戏按痤疮 / 悬空影微调）
+
+// ---- 屏幕空间追踪阴影（lib/lighting/shadow.glsl screenSpaceShadowVisibility + lighting.glsl 接入，方案见 plans/屏幕空间追踪阴影方案.md）----
+// 沿主光源方向对 depthtex1 世界空间 ray march，一档追踪兼两职：近景补接触细节（normal offset /
+// PCF 模糊吃掉的小影），远景接管（贴图 0.9D→D 淡出后为唯一阴影源，视距远超 shadowDistance）。
+// 机制春v2 谱系（screenSpaceShadow.glsl + deferred5 调用点）、公式自研重写；与贴图可见性取 min
+// 只加暗，temporalBayer64 抖动起点相位、composite_taa 时间累积收敛（与 PCF 同一收敛机制）。
+// 适用范围：近景（< NEAR_BOUNDARY·D）只 trace 向光非 SSS（保薄叶透光）；远景向光或 SSS 均可，
+// SSS 结果在 NEAR_BOUNDARY→HANDOVER 从 1.0 渐入全效——HANDOVER 同时是贴图淡出窗起点，
+// 0.7 / 0.9 / 1.0 三锚点交接链。开关宏与数值常量分离（TAAU 同纪律）；命名不缩写 SSS
+//（本包语境已被次表面散射占用）
+#define SHADOW_SCREEN_SPACE
+#ifdef SHADOW_SCREEN_SPACE
+const int   SHADOW_SS_STEPS          = 8;    // 步数：temporalBayer64 64 相位 × TAA 补采样密度（Photon 10 / Bliss·Kappa 16 / 春v2 5，居中）；极低配降 6
+const float SHADOW_SS_LENGTH_NEAR    = 0.4;  // 近距追踪长度（格，dist ≤ 5 格锚点）：接触阴影主尺度（楼梯棱 / 草根）
+const float SHADOW_SS_LENGTH_FAR     = 10.0; // shadowDistance 处长度（格，D 外饱和）：远景接管的山体尺度；嫌远景噪声 / 肥影先降此值
+const float SHADOW_SS_THICKNESS_NEAR = 0.1;  // 命中窗 3D 距离基数（格）：近中景紧窗防薄几何自命中
+const float SHADOW_SS_THICKNESS_FAR  = 10.0; // D 处命中窗上限（格）：接管区容表面起伏 + 步距透视放大；自春v2 的 20 收紧——本包无雾，远场掠射退化（径向序对海拔二阶不敏感、命中退化为噪声翻转）直接可见，肥窗放大边界描黑
+const float SHADOW_SS_EDGE_START     = 0.75; // 渲染边界淡出起点（×far，相机远平面 ≈ 渲染半径）：远边界掠射带的命中判定退化为噪声、经 TAA 平均成沿边界的渐变描黑——自此处向边界淡出（修复实测问题）
+const float SHADOW_SS_EDGE_END       = 0.9;  // 渲染边界淡出终点（×far）：边界带回退无影（本效果接入前的原状态，优于描黑）；接管主体 0.9D → EDGE_START·far 不受影响，嫌边界仍有暗带先抬 START
+const float SHADOW_SS_NEAR_BOUNDARY  = 0.7;  // 近/远景分界（×D）：近景不 trace SSS（保透光观感）、远景 trace（保接管，树冠在 0.9D 外必须有影）
+const float SHADOW_SS_HANDOVER      = 0.9;  // 接管窗起点（×D）：SSS 渐入终点 = 贴图淡出起点，交接链三锚点（0.7 / 0.9 / 1.0）
+const float SHADOW_SS_GATE          = 0.01; // 贴图可见性门（最大通道）：全影像素不 trace——最便宜的性能门（春v2 早退同款）；D 外贴图恒 1、门自然放行
+const float SHADOW_SS_STRENGTH      = 1.0;  // 整体不透明度（0~1）：接触影 / 接管影轻重的第一调效位
+const float SHADOW_SS_FAR_SCALE     = 1.0;  // D 外整体缩放（春v2 取 0.9 微减弱接管区噪声观感，默认不采纳）
+#endif
 
 #endif

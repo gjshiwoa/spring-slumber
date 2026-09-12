@@ -9,7 +9,8 @@
 //   vDirectIrradiance / vSkyAmbient 由通用全屏 vsh 输出，接入方 fsh 须在本文件 include 之前声明
 //   同名 in（未来前向 program 如 water 共享本函数时，由其 vsh 输出同名 varying）
 // 仅片段阶段；依赖由接入的 program 先行 include：uniforms.glsl / constants.glsl（含 PI）/
-//   utils/space.glsl（viewToWorldDirection / viewToRelativeWorld）/ lighting/shadow.glsl
+//   utils/space.glsl（viewToWorldDirection / viewToRelativeWorld / remapSaturate）/
+//   lighting/shadow.glsl（sampleShadowVisibility，SHADOW_SCREEN_SPACE 时兼 screenSpaceShadowVisibility）
 #ifndef LIB_LIGHTING_GLSL
 #define LIB_LIGHTING_GLSL
 
@@ -46,6 +47,28 @@ vec3 shadeSurface(vec3 albedo, vec3 normalView, vec2 lm, vec3 viewPos, vec3 dire
     vec3 shadowVis = ndlWrapped > 0.0
         ? sampleShadowVisibility(relativeWorldPos, normalWorld, ndl, distWorld, sssStrength)
         : vec3(0.0);
+
+#ifdef SHADOW_SCREEN_SPACE
+    // 屏幕空间追踪阴影（shadow.glsl，min 合成只加暗——乘会把 PCF 半影与 SS 半影叠乘过暗）：
+    // 适用范围（春v2 结构、锚点外推）——近景（< NEAR_BOUNDARY·D）只 trace 向光非 SSS：薄叶透光
+    // 是植被观感的立身之本，沿光向的自遮挡 trace 会把背光辉光整体抹黑；远景（接管区）向光或 SSS
+    // 均 trace：0.9D 外树冠必须有影、透光观感让位——SSS 结果在 NEAR_BOUNDARY→HANDOVER 从 1.0
+    // 渐入全效（HANDOVER = 贴图淡出窗起点，0.7 / 0.9 / 1.0 三锚点交接链）。背光非 SSS 永不
+    // trace：其 wrap 余弦 = 0、直射本就为 0，纯省成本。贴图可见性门在 min 语义下排除全影像素
+    //（D 外贴图恒 1、门自然放行 = 接管区照常 trace）；彩色阴影取最大通道判全影，不透明遮挡者
+    // 命中把 rgb 整体压 0（玻璃后另有不透明物 = 全影）、玻璃自身不在 depthtex1、透射色语义保留
+    bool nearRange = distWorld < SHADOW_SS_NEAR_BOUNDARY * shadowDistance;
+    bool traceable = nearRange ? (ndl > 0.0 && sssStrength <= 0.0)
+                               : (ndl > 0.0 || sssStrength > 0.0);
+    if (traceable && max(max(shadowVis.x, shadowVis.y), shadowVis.z) > SHADOW_SS_GATE) {
+        float ssVis = screenSpaceShadowVisibility(viewPos, normalView, distWorld);
+        float sssFade = sssStrength > 0.0
+            ? remapSaturate(distWorld, SHADOW_SS_NEAR_BOUNDARY * shadowDistance,
+                            SHADOW_SS_HANDOVER * shadowDistance, 0.0, 1.0)
+            : 1.0;
+        shadowVis = min(shadowVis, vec3(mix(1.0, ssVis, sssFade * SHADOW_SS_STRENGTH)));
+    }
+#endif
 
     // 直射辐照度：大气顶辐照度 × 调用方传入的大气透射率。deferred_init 使用玩家 / 相机高度
     // 近似全部表面海拔，并在全屏 vsh 中每帧仅计算 3~4 次。

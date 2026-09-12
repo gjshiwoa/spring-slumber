@@ -9,15 +9,19 @@
 //   vSunHeight / vMoonHeight / vNoonFactor / vNightFactor / vDayFactor（统一时间系统）
 //   vDirectIrradiance  大气顶直射辐照度（门控加权和 + 雨天衰减，切换处黑过渡）
 //   vDirectTransmittance 相机高度近似的主光源透射率（宏 FULLSCREEN_DIRECT_TRANSMITTANCE 门控）
+//   vCloudTransmittance 云层海拔处的主光源透射率（宏 FULLSCREEN_CLOUD_TRANSMITTANCE 门控，
+//                     CLOUDS_2D 时由 deferred_init 定义）：云的直射光着色用——相机无关（云受光
+//                     由云自身海拔决定），日落时云比地面晚变红（高处光学深度小）
 //   vSkyAmbient       天空环境辐照度基色 = LUT 探针 rgb（天顶色）× SKY_AMBIENT_BRIGHTNESS，
 //                     无效回退常量昼夜 mix；雨天去饱和最后并入
 //   vHorizon          观察者地平线几何 (cosBeta, beta, zenithHorizon)
 //   vSkyLutValid      LUT 有效性（flat float 0/1——bool varying 为补丁器 / 部分驱动不容；
 //                     探针 rgb 另作 vSkyAmbient 的天顶色源，fetch 双重职责）
-// 依赖先行 include：constants.glsl（TAU / 大气与光照常量、SKYVIEW_*）、uniforms.glsl（光源位置 /
-//   sunAngle / rainStrength / cameraPosition / colortex7 / frameCounter / 视口）、utils/space.glsl、
-//   utils/noise.glsl（taaJitterUV）、lib/post/exposure.glsl（readAdaptedExposure 及其依赖链）；
-//   定义 FULLSCREEN_DIRECT_TRANSMITTANCE 时还需 lib/atmosphere/atmosphere.glsl（opticalDepthToSpace）
+// 依赖先行 include：constants.glsl（TAU / 大气与光照常量、SKYVIEW_*、CLOUDS_2D 开时的
+//   CLOUDS_2D_HEIGHT）、uniforms.glsl（光源位置 / sunAngle / rainStrength / cameraPosition /
+//   colortex7 / frameCounter / 视口）、utils/space.glsl、utils/noise.glsl（taaJitterUV）、
+//   lib/post/exposure.glsl（readAdaptedExposure 及其依赖链）；定义 FULLSCREEN_DIRECT_TRANSMITTANCE
+//   或 FULLSCREEN_CLOUD_TRANSMITTANCE 时还需 lib/atmosphere/atmosphere.glsl（opticalDepthToSpace）
 #ifndef PROGRAM_FULLSCREEN_VSH_GLSL
 #define PROGRAM_FULLSCREEN_VSH_GLSL
 
@@ -37,6 +41,9 @@ out float vDayFactor;
 out vec3 vDirectIrradiance;
 #ifdef FULLSCREEN_DIRECT_TRANSMITTANCE
 out vec3 vDirectTransmittance;
+#endif
+#ifdef FULLSCREEN_CLOUD_TRANSMITTANCE
+out vec3 vCloudTransmittance;
 #endif
 out vec3 vSkyAmbient;
 out vec3 vHorizon;
@@ -79,6 +86,11 @@ void main() {
 #ifdef FULLSCREEN_DIRECT_TRANSMITTANCE
     // 用玩家 / 相机高度近似全部可见表面海拔；全屏顶点仅计算 3~4 次，deferred 直接插值复用。
     vDirectTransmittance = exp(-opticalDepthToSpace(r, vLightDirection.y));
+#endif
+#ifdef FULLSCREEN_CLOUD_TRANSMITTANCE
+    // 云层海拔处的主光源透射率：半径取云层而非相机——云受光由云自身海拔决定（相机再高也不变）；
+    // 与 vDirectTransmittance 同式同源，日落时云比地面更晚变红（高处光学深度小）
+    vCloudTransmittance = exp(-opticalDepthToSpace(EARTH_RADIUS + CLOUDS_2D_HEIGHT, vLightDirection.y));
 #endif
     float altitudeTerm = max((r - EARTH_RADIUS) * (r + EARTH_RADIUS), 0.0);
     float cosBeta = sqrt(altitudeTerm) / r;

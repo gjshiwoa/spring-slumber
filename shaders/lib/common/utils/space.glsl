@@ -8,6 +8,13 @@
 
 // ---------------- 坐标换算（任意阶段） ----------------
 
+// 线性重映射 + 饱和钳制：x ∈ [e0, e1] → [v0, v1]，域外按端值饱和。屏幕空间追踪阴影的距离
+// remap 族（追踪长度 / 起点偏移 / 厚度曲线 / 贴图淡出窗，shadow.glsl）与 SSS 渐入（lighting.glsl）
+float remapSaturate(float x, float e0, float e1, float v0, float v1) {
+    float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return v0 + t * (v1 - v0);
+}
+
 // 屏幕空间 [0,1] -> 观察空间位置：xy = uv、z = 深度缓冲原始值，*2-1 转 NDC 与透视除法都在
 // 函数内完成（杜绝只转 xy 漏转 depth 的重建错位）；z 取 1 时落在远平面（天空视线）。
 // TAA 深度重建与 deferred_init 天空视线 / 几何 viewPos 共用

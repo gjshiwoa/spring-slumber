@@ -29,6 +29,40 @@ float temporalBayer64(vec2 pixelPos) {
     return fract(bayer64(pixelPos) + float(frameCounter % 64) * GOLDEN_RATIO);
 }
 
+// ---------------- simplex / worley 噪声基元（程序化图案——云；结构移植自春v2 noise.glsl） ----------------
+// hash 为本包替换的无 sin 浮点 hash（Dave Hoskins 构造，纯乘加 + fract、零超越函数——多数 GPU
+// 的 sin 走 SFU / 多周期展开、吞吐低于常规 ALU，且纯 IEEE 运算跨驱动位确定、比 sin 更利于 TAA
+// 时间累积）。替换春v2 sin-dot 系的代价：云图案整体更换（统计等价、观感需 A/B）。输入坐标须
+// ~1e4 量级内有界——消费方为角域坐标（云 = 世界 xz / 云壳半径，octave 放大后 ~10³~10⁴），该量级
+// 内精度无损；更大坐标域须换整数 hash（扩展点）
+
+// [0,1)² hash（worley 特征点等）
+vec2 rand2(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+// simplex 梯度向量（[-1,1]，rand2 同款 hash ×2−1）
+vec2 hash22(vec2 p) {
+    return -1.0 + 2.0 * rand2(p);
+}
+
+// 解析 simplex 噪声（[-1,1]，IQ / Gustavson 构造）
+float simplex2d(vec2 p) {
+    const float K1 = 0.366025404;
+    const float K2 = 0.211324865;
+
+    vec2 i = floor(p + (p.x + p.y) * K1);
+    vec2 a = p - (i - (i.x + i.y) * K2);
+    vec2 o = (a.x < a.y) ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
+    vec2 b = a - o + K2;
+    vec2 c = a - 1.0 + 2.0 * K2;
+    vec3 h = max(0.5 - vec3(dot(a, a), dot(b, b), dot(c, c)), 0.0);
+    vec3 n = h * h * h * h * vec3(dot(a, hash22(i)), dot(b, hash22(i + o)), dot(c, hash22(i + 1.0)));
+    return dot(vec3(70.0), n);
+}
+
 // ---------------- TAA jitter（对应春雷 lib/common/utils/stochastic.glsl 的 jitter 部分） ----------------
 // 由 gbuffer 类 program 的 vsh 与通用全屏 vsh（program/fullscreen_vsh.glsl，其 vJitter 即
 // taaJitterUV 的 vsh 侧一次算好）按需平铺引入
@@ -55,13 +89,23 @@ vec4 applyTAAJitter(vec4 clipPos) {
     return clipPos;
 }
 
-// uv 域补偿对：几何已 +jitter，屏幕坐标 <-> 无抖动坐标互转（未来 SSR / SSAO 等采样一致性用，春雷同款）
+// uv 域补偿对：无抖动全视场 uv <-> buffer uv 互转（几何已 +jitter；屏幕空间追踪阴影 / 未来 SSR /
+// SSAO 等的采样一致性用，春雷同款 + TAAU 补全）。TAAU：几何先缩进左下 [0,S]² 子区域再叠 jitter，
+// buffer uv = 全视场 uv·S + jitter——与 deferred_init 去抖基底 (像素uv − vJitter)/S 严格互逆；
+// 不补 ×S 时补偿随 S 缩水（S=0.5 只剩 1/4）、采样错位 ~0.375 渲染纹素（TAAU 糊/闪同因）
 vec2 applyJitter(vec2 uv) {
+#ifdef TAAU
+    uv *= RENDER_SCALE;
+#endif
     return uv + taaJitterUV();
 }
 
 vec2 applyInverseJitter(vec2 uv) {
-    return uv - taaJitterUV();
+    uv -= taaJitterUV();
+#ifdef TAAU
+    uv /= RENDER_SCALE;
+#endif
+    return uv;
 }
 
 // ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段） ----------------
