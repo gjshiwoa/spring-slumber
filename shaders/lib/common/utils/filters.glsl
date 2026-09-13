@@ -28,10 +28,12 @@ vec3 tentFilter4(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {
     return result * 0.25;
 }
 
-// 13-tap 下采样核（COD: Advanced Warfare，春雷快速路径同款）：
+// 13-tap 下采样核（tap 布局：COD: Advanced Warfare；权重：春雷那套，见其 filters.glsl）：
 // tap 步长由调用方给定（源纹素数 × 源纹素尺寸），配合双线性中点采样，每级覆盖 = ±2×步长纹素
 // center / tapStep 为源纹理归一化坐标；clampRect = (min.xy, max.xy) 源区域半纹素内缩后的钳制范围，tap 越界钳回边缘
 // https://www.iryoku.com/next-generation-post-processing-in-call-of-duty-advanced-warfare/
+// 权重与原版 COD 的 1/32、1/16、1/8 幂分数不同（角 / 边降、中心与对角抬，3×3 主体 0.52 / 对角 0.48，
+// 分布略窄），十进制合计精确 = 1.000——消费端不做二次归一化，float 求和漂移 ~1e-7 对 bloom 不可见
 const vec2  downsample13Offsets[13] = vec2[13](
     vec2(-2.0,  2.0), vec2(0.0,  2.0), vec2( 2.0,  2.0),
     vec2(-2.0,  0.0), vec2(0.0,  0.0), vec2( 2.0,  0.0),
@@ -39,10 +41,10 @@ const vec2  downsample13Offsets[13] = vec2[13](
     vec2(-1.0,  1.0), vec2(1.0,  1.0), vec2(-1.0, -1.0), vec2(1.0, -1.0)
 );
 const float downsample13Weights[13] = float[13](
-    0.03125, 0.0625, 0.03125,
-    0.0625,  0.125,  0.0625,
-    0.03125, 0.0625, 0.03125,
-    0.125,   0.125,  0.125,  0.125
+    0.010,  0.070, 0.010,
+    0.070,  0.200, 0.070,
+    0.010,  0.070, 0.010,
+    0.120,  0.120, 0.120,  0.120
 );
 
 vec3 downsample13Tap(sampler2D src, vec2 center, vec2 tapStep, vec4 clampRect) {

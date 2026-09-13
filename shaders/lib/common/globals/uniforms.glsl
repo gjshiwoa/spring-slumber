@@ -8,7 +8,7 @@ uniform sampler2D normals;  // 法线贴图（labPBR 约定，rgb 存切线空�
 uniform sampler2D specular; // 高光贴图（labPBR 约定，r = smoothness，g = F0，b = porosity/SSS，a = emissive）
 
 uniform sampler2D colortex0; // 场景主颜色缓冲，deferred_init 初始化、composite_taa 抗锯齿，final 读取后直接输出屏幕（不再写回）
-uniform sampler2D colortex1; // bloom tile 图集：composite4~8 下采样、composite9~12 上采样回卷（tile0 终态 = 合并后的完整泛光），final 消费 tile0、composite12 测光读 tile4，此后不再写入
+uniform sampler2D colortex1; // bloom tile 图集（composite4~8 下采样、composite9~12 上采样回卷，tile0 终态 = 合并后的完整泛光，final 消费 tile0、composite12 测光读 tile4）+ 云形状场槽位（图集右侧 r 通道，布局见 bloom.glsl 的 cloudFieldRect——deferred 槽生成、deferred_init 伪自阴影探针读，见 clouds.glsl）
 uniform sampler2D colortex3; // TAA 历史缓冲（clear = false）：rgb = 上帧混合色，a = 上帧最近片元线性深度；仅 composite_taa 读写
 uniform sampler2D colortex4; // gbuffer: rg = 打包 albedo（4x8→2x16），ba = 打包高光贴图 RGBA
 uniform sampler2D colortex5; // gbuffer: rg = 八面体观察空间法线，ba = 原始 lmcoord；光照接入后读取

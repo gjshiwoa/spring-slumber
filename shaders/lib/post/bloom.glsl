@@ -54,6 +54,19 @@ vec2 bloomMiscRectMax() {
     ) / miscSize;
     return max(skyboxMax, skyViewMax);
 }
+
+#ifdef CLOUDS_2D
+// 云形状场槽位矩形（colortex1，texel 域、整数对齐）：图集包围盒右侧 4 texel 间隔、底边锚定——
+// 与全部 tile 矩形互斥由布局结构性保证（tile0 左下 1/4 域、tile1~4 右侧列均止于包围盒右缘），
+// bloom 链（composite4~12 只写图集区域）与场的写入者（deferred）区域互斥互不干扰。写入端
+//（deferred_cloud_field 的 fsh / vsh quad 压缩）与读取端（clouds.glsl 的 sampleCloudField）共用
+// 本矩形——texel i 中心 ↔ local = (i + 0.5) / RES 的互逆映射由此结构性对齐
+vec4 cloudFieldRect() {
+    vec2 bufSize = vec2(textureSize(colortex1, 0));
+    vec2 origin = ceil(bloomTileRectMax() * bufSize) + 4.0;
+    return vec4(origin, vec2(CLOUDS_2D_FIELD_RES));
+}
+#endif
 // 计算第 k 级 tile 的下采样结果（tileLocal = tile 内容归一化坐标，像素中心即源 2×2 区域中心）
 // k = 0 直接从 colortex0 全屏取，k > 0 从上一级 tile 取（链式）
 vec3 bloomDownsampleTile(int k, vec2 tileLocal) {

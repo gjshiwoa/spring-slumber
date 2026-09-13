@@ -1,3 +1,3 @@
 #version 330 compatibility
 #define STAGE_FRAGMENT
-#include "/program/deferred_init.glsl"
+#include "/program/deferred_cloud_field.glsl"

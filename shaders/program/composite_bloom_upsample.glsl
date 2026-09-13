@@ -13,6 +13,7 @@
 //   - 其余像素：包围盒内同位置读回透传（clear=false 跨帧保值），区域外光栅带写 0 免回读
 // DRAWBUFFERS 随输出不同下放入口文件（composite9~11 = 1、composite12 = 17），program 不携带
 // vsh 把 quad 压缩到全图集包围盒（BLOOM_LEVEL 0 为上述并集包围矩形）；fsh 前半 / vsh 后半
+//（云形状场的生成在 deferred 槽的 deferred_cloud_field、不涉本 pass）
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/pipeline/varying_io.glsl"

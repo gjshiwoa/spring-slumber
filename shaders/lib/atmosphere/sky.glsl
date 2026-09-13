@@ -10,9 +10,10 @@
 //   a ∈ [0,1] 方位角（sqrt 使纹素向光源侧集中，分辨率 SKYVIEW_LUT_W = 200）、
 //   v ∈ [0,1] 天顶角（上 / 下半段各一段 sqrt 使纹素向地平线集中，分辨率 SKYVIEW_LUT_H = 100）、
 //   参数域线性映射首末纹素中心（半纹素内缩）：采样不越区域边界、与相邻槽位不串色
-// 依赖由接入的 program 先行 include：uniforms.glsl（sunPosition / moonPosition / colortex7 等）、
-//   constants.glsl（TAU、大气常量、SKYVIEW_*）、utils/space.glsl（viewToWorldDirection）、
-//   atmosphere.glsl（物理核心，仅解析路径与 LUT 生成端使用）
+// 依赖由接入的 program 先行 include：uniforms.glsl（sunPosition / moonPosition / colortex7 /
+//   cameraPosition / rainStrength）、constants.glsl（TAU、大气常量、SKYVIEW_*、SUN_DISK_*）、
+//   utils/space.glsl（viewToWorldDirection）、atmosphere.glsl（物理核心，仅解析路径与 LUT 生成端
+//   使用 + getSunDisk 的 planetHitDistance / opticalDepthToSpace）
 // sunDirectionWorld / moonDirectionWorld 供 composite12 LUT 生成端顶点阶段调用；
 // 采样端 getSkyColor 的光源方向与地平线几何为显式参数（调用方从 vsh 帧数据 varying 传入）
 #ifndef LIB_SKY_GLSL
@@ -119,6 +120,38 @@ vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon
         color += sampleSkyViewLutHalf(skyViewLutMoonRect(),
                                       vec2(skyViewLutAzimuthParam(dirWorld, moonDirWorld), zenithParam));
     return lutValid ? color : fallbackSkyColor(dirWorld, sunDirWorld);
+}
+
+// 太阳盘（线性 HDR，deferred_init 天空分支在 getSkyColor 之后、云合成之前解析叠加——LUT 纹素
+// 角尺寸远大于圆盘、只能解析绘制；先于云叠加 = 云 alpha 遮挡太阳）。颜色与地面直射光同源同式：
+// SOLAR_IRRADIANCE × 沿视线大气透射率（视线对准太阳时与 vDirectTransmittance 同一条 opticalDepth-
+// ToSpace 路径，日落红化与场景阳光色一致）× 雨天衰减（与 vDirectIrradiance 同系数）。origin 取
+// 相机海拔近似（球对称大气下与水平位置无关，与通用全屏 vsh 的地平线几何同款 r 式）
+// 地平线遮挡 = planetHitDistance：视线与地球相交即地表以下、无太阳——太阳沉没时圆盘下缘视线
+// 陆续穿地被硬切，掠射带透射率已自然衰减到黑、切割处无亮度跳变；不乘 vNoonFactor 时间门（那是
+// 光照切换黑过渡的语义，在高度 0→0.05 提前熄灭直射光——几何可见性交给本遮挡判定，红日出完整
+// 呈现）。角距离在 1−cos 域度量（mu ≈ 0.99998 时 cos 域差仅 ~1e-5、逼近 float32 精度，1−cos 保
+// 留相对精度）；远离圆盘的视线于角距离早退——绝大多数天空像素只付 1 normalize + 1 dot
+// dirView 视图空间方向（不要求归一化，与 getSkyColor 同签名风格）；sunDirWorld 世界系归一化
+vec3 getSunDisk(vec3 dirView, vec3 sunDirWorld) {
+    vec3 dirWorld = normalize(viewToWorldDirection(dirView));
+    float mu = dot(dirWorld, sunDirWorld);
+
+    // 1−cos 域边界：盘芯（全亮）与盘外（全黑），常数折叠一次
+    float edgeInner = 1.0 - cos(SUN_DISK_RADIUS);
+    float edgeOuter = 1.0 - cos(SUN_DISK_RADIUS + SUN_DISK_SOFTEN);
+    float d = 1.0 - mu;
+    if (d > edgeOuter)
+        return vec3(0.0);
+
+    float r = EARTH_RADIUS + max(cameraPosition.y, 1.0);
+    if (planetHitDistance(r, dirWorld.y) < 1e29)
+        return vec3(0.0); // 视线打到地面（含掠地平线下沿）——地表以下无太阳
+
+    float disk = 1.0 - smoothstep(edgeInner, edgeOuter, d);
+    vec3 transmittance = exp(-opticalDepthToSpace(r, dirWorld.y));
+    return SOLAR_IRRADIANCE * transmittance * (SUN_DISK_BRIGHTNESS * disk)
+         * (1.0 - SUN_DISK_RAIN_FADE * rainStrength);
 }
 
 // ---------- 生成端（composite_bloom_upsample / composite12） ----------

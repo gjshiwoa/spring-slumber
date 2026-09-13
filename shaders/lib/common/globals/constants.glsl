@@ -15,13 +15,13 @@ const float PI             = TAU * 0.5;
 const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
 const float GOLDEN_RATIO    = 0.61803398875; // 黄金比例共轭 1/φ（春v2 同值）：temporal 噪声帧间相位偏移（noise.glsl）
 const float ALPHA_CUTOUT   = 0.5;           // cutout 透贴裁剪阈值
-const float ambientOcclusionLevel = 0.0;    // 引擎指令：关闭原版 AO（光照由光影接管，不叠原版顶点暗角）
+const float ambientOcclusionLevel = 1.0;    // 引擎指令：原版平滑光照 AO 强度（缩放引擎烙进顶点色 rgb 的暗角，随 albedo 打包进 colortex4；0 = 关闭）
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
 const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上限 = MIN + SPAN = 31/32）
 
 // ---- 缓冲格式 ----
 const int colortex0Format = RGBA16F; // 场景颜色
-const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（composite4~12 写）：无符号 11/11/10、无 alpha，较 RGBA16F 带宽减半；COD 核小负瓣写入钳 0 无损
+const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（composite4~12 写）+ 云形状场槽位（deferred 写、图集右侧 r 通道，布局见 bloom.glsl 的 cloudFieldRect）：无符号 11/11/10、无 alpha，较 RGBA16F 带宽减半；COD 核小负瓣写入钳 0 无损
 const int  colortex3Format = RGBA16F; // TAA 历史缓冲：rgb = 上帧混合色（线性 HDR），a = 上帧最近片元线性深度（解遮挡置信）
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
@@ -80,6 +80,15 @@ const int   SKY_MS_QUAD_BANDS    = 8;   // 球面求积环带数（Δcosθ 等�
 const int   SKY_MS_QUAD_AZIMUTHS = 6;   // 每环带方位节点数（带间黄金角错位防与光源几何对齐）；× BANDS = 48 节点
 const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测 ≤ ~0.30，防极端海拔撑爆几何级数分母）
 
+// ---- 太阳盘（sky.glsl getSunDisk，deferred_init 天空分支解析叠加）----
+// LUT 半区 200×100 的纹素角尺寸远大于 ~1° 视角圆盘、装不下，太阳盘只能解析绘制；亮度与
+// 地面直射光同源（SOLAR_IRRADIANCE × 沿视线透射率），日落红化 / 雨天衰减与场景阳光色自动一致。
+// 遮挡 = planetHitDistance（与 LUT 生成端同一行星几何），太阳沉没即圆盘下缘被地平线硬切
+const float SUN_DISK_RADIUS     = 0.0188; // 视角半径（弧度）≈ 1.08°：约 4 倍真实太阳（0.267°），全角 ~2.2°，按反馈连续放大；嫌大回抬此值
+const float SUN_DISK_SOFTEN     = 0.0015; // 边缘软化宽度（弧度）≈ 0.086°：约一渲染纹素（1080p/70°FOV 一像素 ~0.065°、TAAU S=0.7 渲染纹素 ~0.093°），抗锯齿过渡带交由 TAA 时间累积抹平
+const float SUN_DISK_BRIGHTNESS = 450.0;  // 亮度定标：正午 E ≈ 237 × T ≈ 0.87 × 450 ≈ 9×10⁴ 已越过 RGBA16F 上限、盘心钳至 65504 纯白（AgX 本就滚落成白炽、视觉无损），bloom 泛光与日落红盘（未及钳、随本值线性）是主要观感来源；物理辐射亮度 E·T/Ω 会更高三个量级，故为视觉定标非能量定标；嫌亮 / 嫌暗调此值
+const float SUN_DISK_RAIN_FADE  = 0.75;   // 雨天辐照度衰减（与 vDirectIrradiance 的 (1 − 0.75·rain) 同系数）：阴天太阳随直射光一起淡出（云层遮挡由绘制顺序天然给出）
+
 // ---- 云（2D 平面云，lib/atmosphere/clouds.glsl；方案移植自春v2 clouds2D，2D 云原作者 Coldnight冷夜）----
 // 单层解析云：云壳求交（与大气共用 EARTH_RADIUS）+ 角坐标 6 octave simplex fbm（各 octave 差速
 // 演变）+ Klein-Nishina 前向散射相位照明，alpha = 密度 × 距离衰减；画在 deferred_init 天空分支
@@ -88,6 +97,11 @@ const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测
 // 开关宏与数值常量分离（预处理 #if 不支持浮点比较，TAAU 同款纪律）
 #define CLOUDS_2D
 #ifdef CLOUDS_2D
+// fbm 前微扰 warp 场用 simplex（1 次 simplex = 3 hash）替代春v2 的 worley（3×3 邻域 = 9 hash）——
+// warp 职责只是打碎团块感的平滑位移场、任何低频噪声都胜任；位移场从胞状距离变梯度场，云的破碎
+// 纹理风格会变（统计等价）。A/B 回退点：删本宏定义即回 worley 版（cloudWarp 内 #else 分支，
+// 已带平方距离比较 + 循环外单次 sqrt 的降耗版）
+#define CLOUDS_2D_WARP_SIMPLEX
 const float CLOUDS_2D_HEIGHT        = 8000.0;  // 云层海拔（米，春v2 同值）：高处大片层云观感 + 角坐标数值域有界；与 vCloudTransmittance 半径共用（同一常量）
 const float CLOUDS_2D_COVERAGE      = 0.55;    // 覆盖率（春v2 0.45、按反馈上调）：coverage 重映射阈值，抬 = 云更多更整片
 const float CLOUDS_2D_COVERAGE_RAIN = 0.85;    // 雨天覆盖率（本包适配：春v2 雨天只减密度、阴天感由其体素云层承担，本包无底层故抬 coverage 成阴天）
@@ -99,9 +113,17 @@ const float CLOUDS_2D_PHASE_G       = 0.25;    // KN 相位前向不对称度（
 const float CLOUDS_2D_PHASE_E       = 1.879;   // KN 相位 e 参数（本包优化）：由 PHASE_G 经牛顿迭代离线解出（残差方程 1/e − 2/ln(2e+1) + 1 = g，g = 0.25 → e ≈ 1.879）——与 PHASE_G 成对维护、改 g 须重解；春v2 逐像素 8 次迭代运行时求解，折叠后免 9 次超越函数
 const float CLOUDS_2D_PHASE_LOGTERM = 1.560;   // ln(2e+1)（本包优化）：同上离线解出、与 PHASE_E 成对
 const float CLOUDS_2D_LIGHT_DRIFT   = 4000.0;  // 伪自阴影的光源侧偏移距离（米，本包扩展）：相对噪声周期（云壳半径 / SCALE ≈ 21 km）取数 km——偏移落在云边缘另一侧才有明暗差；sunPathRotation −30° 下正午仰角 ≈ 60°、水平投影 ≈ 0.5，调制减弱而非消失（仅太阳真正近天顶才趋零）
-const float CLOUDS_2D_SHADOW_GAIN   = 3.5;     // 密度差 → 明暗映射增益（本包扩展）：大 = 边缘阴影更锐；差分降配到低频场后调制略趋平滑，嫌淡先抬此值
+const float CLOUDS_2D_SHADOW_GAIN   = 3.5;     // 密度差 → 明暗映射增益（本包扩展）：大 = 边缘阴影更锐；探针场化到 2 octave + bilinear 后调制趋平滑，嫌淡先抬此值
 const float CLOUDS_2D_SHADOW_STRENGTH = 0.45;  // 伪自阴影幅度（本包扩展）：直射项 × [1−S, 1+S]——0.35 偏淡 / 0.6 偏重，0.45 折中档；0 = 关闭
-const int   CLOUDS_2D_SHADOW_OCTAVES = 3;      // 伪自阴影偏移重采样的 octave 数（本包优化）：主采样 fbm 同循环累出同场低频 partial、偏移采样只求值前 N 个 octave + 复用主 worley warp 位移——两测同场差分无偏；6 = octave 与主采样同配（warp 仍为复用，与逐点独立 warp 不完全等价）
+// 云形状场（colortex1 图集右侧槽位、布局矩形见 bloom.glsl 的 cloudFieldRect）：世界锚定的低频云
+// 形状（warp + 前 FIELD_OCTAVES 个 octave 的 fbm 经 cloudShape），窗口跟相机、内容为绝对世界
+// 坐标的确定函数。deferred 槽生成（program/deferred_cloud_field）、deferred1（deferred_init）同帧
+// 消费、零滞后——引擎的缓冲 clear 在 gbuffers 后、deferred 链前，场的写入在 clear 后、消费在下一
+// clear 前，时序天然自洽（colortex1Clear 无需置 false）；bloom 图集自 composite4 起每帧全量重写、
+// 与场槽位区域互斥（布局由 cloudFieldRect 结构性保证）互不干扰
+const int   CLOUDS_2D_FIELD_RES     = 128;     // 场边长（texel）：128² × 9 hash ≈ 0.15M/帧生成成本
+const float CLOUDS_2D_FIELD_WORLD   = 524288.0; // 窗口边长（米，512 km）：texel 4096 m ≤ 场最高 octave（第 2 个，角频率 750）周期 8.48 km 的一半（Nyquist）；半窗口 256 km > fade 早退界 ~221 km（更远处云已透明、不采样）——bilinear 边缘永不被触达
+const int   CLOUDS_2D_FIELD_OCTAVES = 2;       // 场 octave 数：探针 / 云影只需低频明暗，2 octave 是 4 km texel 的 Nyquist 上限（第 3 个 octave 周期 3.4 km 需 ≤1.7 km texel）；frequency / weight / time 序列与 cloudSimplexFbm 严格一致（改动须两处联动）
 const float CLOUDS_2D_SKY_MIX       = 0.2;     // 光照的天空环境占比（春v2 同值；春v2 兼作层合成强度，本包无体素云底层、整层全强度合成，此常量只管光照混合）
 const float CLOUDS_2D_FADE_DISTANCE = 24000.0; // 距离衰减 exp 尾长（米，春v2 同值）：地平线云溶进大气亮带的收口
 const float CLOUDS_2D_BRIGHTNESS    = 1.25;    // 云亮度（春v2 取 3.5 按其 sunColor 量级；本包直射辐照度 ≈ 236、白地形 E/π ≈ 75，取 1.25 → 正午云 ≈ 100~150 略亮于白地形、AgX 滚落；进游戏按观感微调）
@@ -280,9 +302,10 @@ const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（�
 //（本包语境已被次表面散射占用）
 #define SHADOW_SCREEN_SPACE
 #ifdef SHADOW_SCREEN_SPACE
-const int   SHADOW_SS_STEPS          = 8;    // 步数：temporalBayer64 64 相位 × TAA 补采样密度（Photon 10 / Bliss·Kappa 16 / 春v2 5，居中）；极低配降 6
-const float SHADOW_SS_LENGTH_NEAR    = 0.4;  // 近距追踪长度（格，dist ≤ 5 格锚点）：接触阴影主尺度（楼梯棱 / 草根）
-const float SHADOW_SS_LENGTH_FAR     = 10.0; // shadowDistance 处长度（格，D 外饱和）：远景接管的山体尺度；嫌远景噪声 / 肥影先降此值
+const int   SHADOW_SS_STEPS          = 8;    // 步数：temporalBayer64 64 相位 × TAA 补采样密度（Photon 10 / Bliss·Kappa 16 / 春v2 5，居中）；步序同时是命中软化分档（N 越大帧内梯度越细）；极低配降 6
+const int   SHADOW_SS_CONTACT_STEPS  = 3;    // 接触死区步数 K：命中步序 i ≤ K 不软化、整像素全影——近端 trace 的职责是把贴图被 normal offset 浮空带（SHADOW_BIAS_NORMAL 0.05 格起、掠射背光放大至 ~0.11 格）与 PCF 模糊吃掉的接触影满强度补回，软化补不上；两者合计的接缝带至 ~17 cm，K=2〔死区 ~10 cm〕实测补不满、抬到 3（死区 ≈ (K+1)×步长 ≈ 20 cm 覆盖，随 trace 长度自动缩放）；再抬的代价 = 软化段最大深度变浅（(N−1−K)/N）、接管区全影范围扩大
+const float SHADOW_SS_LENGTH_NEAR    = 0.4;  // 近距追踪长度（格，dist ≤ 5 格锚点）：接触阴影主尺度（楼梯棱 / 草根）；长度同时定软化段深浅——死区外命中返回 (i−K)/N，抬长 = 同一遮挡落更早步序 = 更深
+const float SHADOW_SS_LENGTH_FAR     = 10.0; // shadowDistance 处长度（格，D 外饱和）：远景接管的山体尺度；嫌远景噪声 / 肥影先降此值、嫌步序软化后接管影整体偏浅则抬此值
 const float SHADOW_SS_THICKNESS_NEAR = 0.1;  // 命中窗 3D 距离基数（格）：近中景紧窗防薄几何自命中
 const float SHADOW_SS_THICKNESS_FAR  = 10.0; // D 处命中窗上限（格）：接管区容表面起伏 + 步距透视放大；自春v2 的 20 收紧——本包无雾，远场掠射退化（径向序对海拔二阶不敏感、命中退化为噪声翻转）直接可见，肥窗放大边界描黑
 const float SHADOW_SS_EDGE_START     = 0.75; // 渲染边界淡出起点（×far，相机远平面 ≈ 渲染半径）：远边界掠射带的命中判定退化为噪声、经 TAA 平均成沿边界的渐变描黑——自此处向边界淡出（修复实测问题）

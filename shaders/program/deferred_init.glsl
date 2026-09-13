@@ -1,14 +1,18 @@
-// 初始化 pass: deferred_init（deferred 阶段；vsh = 通用全屏 vsh，本 program 无自定义 vsh 段，
-// fsh 按需声明同名 in）。位于不透明 gbuffers 之后、半透明之前，初始化场景颜色 colortex0：
+// 初始化 pass: deferred_init（deferred1 阶段——deferred 槽为云形状场生成 pass，见
+// program/deferred_cloud_field.glsl：同帧先行、本 pass 探针同帧消费零滞后；vsh = 通用全屏 vsh，
+// 本 program 无自定义 vsh 段，fsh 按需声明同名 in）。位于不透明 gbuffers 之后、半透明之前，
+// 初始化场景颜色 colortex0：
 // 位置重建统一去抖基底——`像素 uv − vJitter`（TAAU 再 /S）一次算出，天空视线（z = 1 远平面）与
 // 几何 viewPos（z = depthtex1 原始深度）共用同一组 xy（几何 vsh 抖动 +J 后本像素含「位置 −J」处
 // 场景，去抖重建得到真实位置）；几何信息采样全 texelFetch(gl_FragCoord) 精确纹素、无 vTexCoord。
 // 天空与深度缓冲几何在地平线边界像素内衔接一致、阴影贴图采样位置逐帧对齐，composite_taa 时间
 // 累积平滑 LUT 双线性 facets 与地平线边界
 // 天空像素（depthtex1 >= 1——纯不透明深度，depthtex0 此刻可能已混入粒子深度）采样 colortex7
-// sky-view LUT，随后叠加 2D 平面云（lib/atmosphere/clouds.glsl：LUT 是纯方向函数、云有平移视差
-// 故不进 LUT；预乘合成 cloud.rgb + 天空 × cloud.a）；天空在本 pass 进 colortex0 是时序关键——
-// 之后半透明引擎混合才有正确天空背景（含云），画在 composite（半透明之后）则水面叠天空处混到黑底
+// sky-view LUT，叠加太阳盘（getSunDisk 解析绘制）与 2D 平面云（lib/atmosphere/clouds.glsl：LUT 是纯方向函数、云有平移视差
+// 故不进 LUT；云的伪自阴影探针读 colortex1 云形状场——deferred 槽同帧生成（滞后仅 LUT 一帧），
+// 机制见 clouds.glsl；预乘合成 cloud.rgb + 天空 × cloud.a）；天空在本 pass 进 colortex0 是时序
+// 关键——之后半透明引擎混合才有正确天空背景（含云），画在 composite（半透明之后）则水面叠天空
+// 处混到黑底
 // colortex0 自此全程线性（final 的 linearToSrgb 是唯一离开线性空间的位置）
 // 几何像素：解包 colortex4/5（albedo / 八面体法线 / lmcoord 重映射）+ 去抖 uv 重建 viewPos 后经
 // shadeSurface 着色（直接光 = 阴影可见性 × 直射透射率 × 辐照度 × wrap 余弦 + 环境 / 方块光，
@@ -81,6 +85,9 @@ void main() {
         // vsh 探针（无效即首帧 / 缓冲重建，回退轻量天空）
         vec3 skyDirView = screenToView(vec3(uv, 1.0));
         color = getSkyColor(skyDirView, vSunDirection, vMoonDirection, vHorizon, vSkyLutValid > 0.5);
+        // 太阳盘解析叠加（LUT 纹素角尺寸装不下 ~2° 圆盘）：与地面直射光同源的透射率红化、
+        // planetHitDistance 地平线遮挡；画在云合成之前 = 云遮挡太阳，地形遮挡由 depth >= 1 天然给出
+        color += getSunDisk(skyDirView, vSunDirection);
 #ifdef CLOUDS_2D
         // 2D 平面云叠加（预乘合成）：地形像素不进本分支、遮挡天然正确；云不写深度，TAA 按天空
         // 路径处理（纯旋转链重投影），TAAU 档与天空同路径上采样
