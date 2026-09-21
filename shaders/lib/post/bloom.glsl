@@ -1,5 +1,5 @@
 // Bloom 工具库：tile 图集布局、链式下采样、渐进上采样回卷与合并入口
-// 依赖先行 include：lib/common/globals/constants.glsl（BLOOM_*）、lib/common/globals/uniforms.glsl（colortex0 / colortex1、
+// 依赖先行 include：lib/common/globals/constants.glsl（BLOOM_*）、lib/common/globals/uniforms.glsl（colortex6 / colortex1、
 // viewWidth / viewHeight）、lib/common/utils/filters.glsl（tentFilter4 / downsample13Tap）
 //
 // 图集布局（缓冲归一化坐标，全尺寸 colortex1，不用 size.buffer——低版本 OptiFine 不支持）：
@@ -9,7 +9,7 @@
 //   每个 tile 都覆盖整个场景（边长逐级减半），所有矩形计算不假设缓冲实际分辨率（textureSize 运行时推导）
 //
 // 双链金字塔（COD AW 式，下采样 composite4~8 + 上采样回卷 composite9~12）：
-//   下采样：tile k = 13-tap 高斯取自上一级（tile0 取自 colortex0），各 tile 存原始金字塔
+//   下采样：tile k = 13-tap 高斯取自上一级（tile0 取自 colortex6），各 tile 存原始金字塔
 //   上采样：tile k = 本级原始内容 × 级权重 + 上一 pass 已合并 tile k+1 的 tent 放大 2 倍相加，
 //           粗级模糊经逐级 tent 累积成连续衰减——单次大倍率双线性放大的菱形网格、
 //           离散半径直接叠加的环状过渡（网格感 / 空隙感）在此结构下不再产生
@@ -68,12 +68,12 @@ vec4 cloudFieldRect() {
 }
 #endif
 // 计算第 k 级 tile 的下采样结果（tileLocal = tile 内容归一化坐标，像素中心即源 2×2 区域中心）
-// k = 0 直接从 colortex0 全屏取，k > 0 从上一级 tile 取（链式）
+// k = 0 直接从 colortex6 全屏取，k > 0 从上一级 tile 取（链式）
 vec3 bloomDownsampleTile(int k, vec2 tileLocal) {
     if (k == 0) {
         vec2 srcTexel = 1.0 / vec2(viewWidth, viewHeight);
         vec4 clampRect = vec4(srcTexel * 0.5, 1.0 - srcTexel * 0.5);
-        return downsample13Tap(colortex0, tileLocal, BLOOM_BLUR_STEP * srcTexel, clampRect);
+        return downsample13Tap(colortex6, tileLocal, BLOOM_BLUR_STEP * srcTexel, clampRect);
     }
     vec4 srcRect = bloomTileRect(k - 1);
     vec2 bufTexel = 1.0 / vec2(textureSize(colortex1, 0));

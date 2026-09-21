@@ -1,7 +1,7 @@
 // 初始化 pass: deferred_init（deferred1 阶段——deferred 槽为云形状场生成 pass，见
 // program/deferred_cloud_field.glsl：同帧先行、本 pass 探针同帧消费零滞后；vsh = 通用全屏 vsh，
 // 本 program 无自定义 vsh 段，fsh 按需声明同名 in）。位于不透明 gbuffers 之后、半透明之前，
-// 初始化场景颜色 colortex0：
+// 初始化场景颜色 colortex6：
 // 位置重建统一去抖基底——`像素 uv − vJitter`（TAAU 再 /S）一次算出，天空视线（z = 1 远平面）与
 // 几何 viewPos（z = depthtex1 原始深度）共用同一组 xy（几何 vsh 抖动 +J 后本像素含「位置 −J」处
 // 场景，去抖重建得到真实位置）；几何信息采样全 texelFetch(gl_FragCoord) 精确纹素、无 vTexCoord。
@@ -10,13 +10,23 @@
 // 天空像素（depthtex1 >= 1——纯不透明深度，depthtex0 此刻可能已混入粒子深度）采样 colortex7
 // sky-view LUT，叠加太阳盘（getSunDisk 解析绘制）与 2D 平面云（lib/atmosphere/clouds.glsl：LUT 是纯方向函数、云有平移视差
 // 故不进 LUT；云的伪自阴影探针读 colortex1 云形状场——deferred 槽同帧生成（滞后仅 LUT 一帧），
-// 机制见 clouds.glsl；预乘合成 cloud.rgb + 天空 × cloud.a）；天空在本 pass 进 colortex0 是时序
-// 关键——之后半透明引擎混合才有正确天空背景（含云），画在 composite（半透明之后）则水面叠天空
+// 机制见 clouds.glsl；预乘合成 cloud.rgb + 天空 × cloud.a）；天空在本 pass 进 colortex6 是时序
+// 关键——之后前向半透明手动合成才有正确天空背景（含云），画在 composite（半透明之后）则水面叠天空
 // 处混到黑底
-// colortex0 自此全程线性（final 的 linearToSrgb 是唯一离开线性空间的位置）
+// colortex6 自此全程线性（final 的 linearToSrgb 是唯一离开线性空间的位置）
 // 几何像素：解包 colortex4/5（albedo / 八面体法线 / lmcoord 重映射）+ 去抖 uv 重建 viewPos 后经
 // shadeSurface 着色（直接光 = 阴影可见性 × 直射透射率 × 辐照度 × wrap 余弦 + 环境 / 方块光，
 // 见 lib/lighting/lighting.glsl；albedo a 通道植被标记经 materialSSSStrength 转为 SSS 强度）
+// 主颜色在 colortex6（= gaux3）：前向半透明 after 路径以主颜色为合成目标——water 族（water /
+// hand_water / weather，恒 deferred 后）经引擎硬件混合直写（ROP 按提交序原子定序，同 draw 内
+// 重叠半透明片段正确叠层——手动读改写在彼处是竞态、重叠闪纹理），textured 族（时机两可）手动
+// fetch 背景 + mix 写回（gbuffers 阶段 colortex0~3 采样单元被游戏纹理占用〔colortex0 即几何纹理〕、
+// 不可采样，主颜色放 gaux 别名可达的 colortex6 即背景源、无副本中转——旧「colortex4 场景副本」
+// 方案受 gbuffer 位打包的 RGBA16 格式约束会 [0,1] 截断 HDR 背景，已删）。gbuffer 数据（colortex4/5）
+// 本 pass 解包消费完毕后不再回写，内容留存至帧末、无读者。兼写 colortex7（DRAWBUFFERS:67）：
+// pass 顺序标记槽写 1（本 pass 之后的 gbuffers〔water / hand_water / weather〕读到 1、之前的
+// 〔textured 族〕读到 0，composite12 帧末复位），读取端 lib/common/pipeline/pass_order_marker.glsl；
+// 其余 texel 同位置读回透传、逐位保值
 
 #define FULLSCREEN_DIRECT_TRANSMITTANCE
 
@@ -34,6 +44,7 @@
 #ifdef CLOUDS_2D
 #define FULLSCREEN_CLOUD_TRANSMITTANCE // 云高处透射率 varying（CLOUDS_2D 在 constants.glsl——宏门控须在其后；atmosphere.glsl 已于上方引入）
 #endif
+#include "/lib/lighting/ambient.glsl"
 #include "/program/fullscreen_vsh.glsl"
 #include "/lib/atmosphere/sky.glsl"
 #include "/lib/atmosphere/clouds.glsl"
@@ -59,9 +70,10 @@ flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁�
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
-/* DRAWBUFFERS:0 */
+/* DRAWBUFFERS:67 */
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 outColor; // colortex6：场景颜色（前向半透明 after 路径经 gaux3 采样作手动合成背景）
+layout(location = 1) out vec4 outMisc;  // colortex7：pass 顺序标记写 1 + 其余 texel 透传
 
 void main() {
     // 几何信息（depthtex1 / colortex4/5）texelFetch 精确纹素读取——不插值、无 vTexCoord
@@ -118,6 +130,11 @@ void main() {
         }
         */
     }
+    // pass 顺序标记（诊断，机制见 lib/common/pipeline/pass_order_marker.glsl）：标记槽写 1 =
+    // 此刻起 gbuffers 读到「deferred 之后」；其余 texel 读回透传逐位保值（colortex7 除标记外
+    // 内容不变；同 pass 读 + 写与 composite12 透传同款已知取舍）
+    outMisc = pixel == PASS_ORDER_MARKER_TEXEL ? vec4(1.0) : texelFetch(colortex7, pixel, 0);
+
     outColor = vec4(color, 1.0);
 }
 

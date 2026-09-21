@@ -20,12 +20,12 @@ const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
 const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上限 = MIN + SPAN = 31/32）
 
 // ---- 缓冲格式 ----
-const int colortex0Format = RGBA16F; // 场景颜色
 const int colortex1Format = R11F_G11F_B10F; // bloom tile 图集（composite4~12 写）+ 云形状场槽位（deferred 写、图集右侧 r 通道，布局见 bloom.glsl 的 cloudFieldRect）：无符号 11/11/10、无 alpha，较 RGBA16F 带宽减半；COD 核小负瓣写入钳 0 无损
 const int  colortex3Format = RGBA16F; // TAA 历史缓冲：rgb = 上帧混合色（线性 HDR），a = 上帧最近片元线性深度（解遮挡置信）
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴图（位打包需无符号格式）
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
+const int colortex6Format = RGBA16F; // 场景主颜色：放 colortex6（= gbuffers 别名 gaux3）而非惯例的 colortex0——前向半透明 after 路径的手动合成须在 gbuffers 阶段采样主颜色背景，而 colortex0~3 采样单元在该阶段被游戏纹理占用（colortex0 即几何纹理 tex、实测采样返回图集内容），colortex0 全程未使用、不声明格式。须浮点格式：半透明合成背景为线性 HDR，旧「colortex4 副本」方案受 gbuffer 位打包的 RGBA16 格式约束会 [0,1] 截断亮背景（阳光下水面背景偏暗），副本机制已删
 const int colortex7Format = RGBA16F; // 杂项数据（左下角杂项簇，布局见 SKYBOX_LUT_SIZE / SKYVIEW_LUT_*）：预留天空盒 256×256 + 天空 view LUT 200×200（日 / 月半区各 200×100）+ 曝光槽位 1 texel
 const bool colortex7Clear = false;   // 槽位内容跨帧存活；composite12 唯一写入、光栅区域整写并透传非槽位像素（协议见 AGENTS.md / exposure.glsl）
 
@@ -39,6 +39,10 @@ const int SKYBOX_LUT_SIZE      = 256; // 预留：天空盒槽位边长（八面
 const int SKYVIEW_LUT_W        = 200; // 天空 view LUT 半区宽 = 视线-光源方位角参数化分辨率（春雷 skyViewLutSize 同值）
 const int SKYVIEW_LUT_H        = 100; // 天空 view LUT 半区高 = 天顶角参数化分辨率；太阳（上半区）/ 月亮（下半区）纵向堆叠 = 200×200
 const int SKYVIEW_LUT_ORIGIN_X = SKYBOX_LUT_SIZE + 4; // LUT 区域原点 x（texel）= 260：预留天空盒右侧 4 texel 间隔，区域锚定缓冲底边
+// pass 顺序标记槽位（诊断，texel 域）：曝光槽 (258, 0) 右侧紧邻、LUT 左缘（x = 260）外 1 texel——
+// gutter 内与现有槽位结构性互斥、在 composite12 光栅矩形内（可被每帧复位）。机制见
+// lib/common/pipeline/pass_order_marker.glsl
+const ivec2 PASS_ORDER_MARKER_TEXEL = ivec2(259, 0);
 
 // Chapman 解析单次散射（移植自 Shadertoy WcdSW4，MIT，John Payne 2024，https://www.shadertoy.com/view/WcdSW4 ）
 // 密度模型为 r² 高斯 exp(-(r²-R²)/H²)，H 是大数值参数化、不是物理尺度高度——
@@ -67,6 +71,13 @@ const float SKYVIEW_LUT_VALID_MARKER = 0.625; // LUT alpha 有效标记（RGBA16
 //（1e9 时 ~2e-4 luma，经夜间自动曝光放大成可见辉光；1e15 压至曝光上限内不可见），白天主段 airMass < 1e6 不触及
 const float SKY_ERFCX_EXP_MAX = 80.0; // erfcx 负支 exp 上限：2·e^80 ≈ 1.1e35 有限，对应光学深度早已全遮蔽、钳顶无损
 const float SKY_AIRMASS_MAX   = 1e15; // airMass 钳制上限：τ = βmax·1e15 → exp(-τ) = 0；兼杀下视掠射闭式相消的负值 / NaN
+// 地平线方向钳制（春雷 CLAMP_TO_HORIZON / ClampDirToHorizon 同款）：地平线以下的天空求值方向
+//（LUT 下半区纹素；未来反射的向下采样）在散射路径上钳到与地球正好相切的观察者地平线切线、钳后
+// 射线一律按未命中求值——不钳时这些方向是行星命中路径、天光趋黑，钳后取地平线辉光色（暮光带
+// 向下延展）；相位函数仍按未钳制方向求值、角向明暗保留。机制与数值防护见 atmosphere.glsl 的
+// clampDirectionToHorizon 头注。删除本宏 = 回退逐方向直达路径（地平线以下恢复行星命中求值）
+#define SKY_CLAMP_TO_HORIZON
+// Mie 相函数 = HG(g1) 与 Draine(g2, a) 按权重 w 混合（Shadertoy 原调参，前向峰 + 适度后向）
 // Mie 相函数 = HG(g1) 与 Draine(g2, a) 按权重 w 混合（Shadertoy 原调参，前向峰 + 适度后向）
 const float MIE_PHASE_G1 = 0.862;              // HG 主叶前向强度
 const float MIE_PHASE_G2 = 0.5069161813017329; // Draine 次叶
@@ -242,10 +253,12 @@ const float TIME_NOON_RAMP  = 20.0; // 太阳直射门斜率（春v2 同值；20
 const float TIME_NIGHT_RAMP = 40.0; // 月亮直射门斜率（春v2 同值；40 = 0→0.025 约 1.4° 淡入）
 // 直射 = albedo/π × (noon×SOLAR + night×MOON_IRRADIANCE) × solarTransmittance × NdotL × 阴影可见性；
 // 大气顶辐照度与天空 LUT 同源（sky:direct 亮度比物理一致，量级随 SKY_BRIGHTNESS 统调）；环境 / 方块光同为辐照度形式
-const float SKY_AMBIENT_BRIGHTNESS = 2.5; // 天空环境辐照度 = LUT 天顶色 × 本系数（vSkyAmbient 主路径）：半球换算 ≈ π × 1.7（余弦加权天光平均 / 天顶的正午比值），初值与旧 DAY_SKY_AMBIENT 同幅度；统调天光亮度的主旋钮
+const float SKY_AMBIENT_BRIGHTNESS = 3.0; // 天空环境辐照度 = LUT 天顶色 × 本系数（vSkyAmbient 主路径）：半球换算 ≈ π × 1.7（余弦加权天光平均 / 天顶的正午比值）；统调天光亮度的主旋钮
 const vec3 DAY_SKY_AMBIENT   = vec3(6.4, 8.9, 17.6);     // 仅 LUT 无效回退路径生效（vSkyAmbient 回退 / sky.glsl fallbackSkyColor）；≈ π × 余弦加权天光平均
 const vec3 NIGHT_SKY_AMBIENT = DAY_SKY_AMBIENT * 5.0e-4; // 夜晚回退值 = 月亮辐照度比；正常路径只抬 MOON_IRRADIANCE 单旋钮
 const vec3 TORCHLIGHT_COLOR  = vec3(1.00, 0.52, 0.20) * PI; // 方块光辐照度（π × 旧 albedo 直乘时代的量级，行为不变）
+const float TORCHLIGHT_NEAR_SCALE  = 1.30; // 方块光近距离幂曲线主量级（lm.x⁴ 直乘系数）——shadeSurface 与前向简单半透明共用同式
+const float TORCHLIGHT_FLOOR_SCALE = 0.02; // 方块光线性小地板（原始 lm.x 直乘，近距渐灭不断黑）
 const vec3 MIN_AMBIENT       = vec3(0.0035, 0.0040, 0.0055); // 全黑环境兜底（gameplay 地板，刻意低于物理夜天光），避免纯黑不可见
 
 // ---- 次表面散射（SSS，lib/lighting/lighting.glsl + shadow.glsl，春v2 deferred5 同构）----

@@ -116,6 +116,30 @@ float planetHitDistance(float r, float z) {
     return min(t1, t2);
 }
 
+// 地平线方向钳制（春雷 ClampDirToHorizon 同款、+Y 天顶系简化式）：低于观察者地平线的方向投影到
+// 水平面后重抬到与地球（EARTH_RADIUS）正好相切的观察者地平线切线仰角——方位保留、只抬高度；
+// 天底方向（水平分量近零）方位退化取 +X 基准（与 sky.glsl skyViewLutAzimuthParam 的退化基准一致）。
+// out clamped 标记方向被钳制：精确切线使 planetHitDistance 判别式在精确数学下 = 0、float 舍入噪声
+// 令命中判定掷硬币（海拔 <= 0 的水平钳制分支更会 t = 0 → airMass = 0 → 黑纹素），调用方对钳后
+// 射线一律按未命中处理（切线与地表仅切于一点、继续走向大气顶）。消费纪律：散射路径
+//（airMass / tauSp 端点几何）用返回值，相位函数用原方向（mu 的角向变化是地平线
+// 以下天空的明暗来源）；观察者位于地表及以下时切线不存在、退化为钳到水平
+vec3 clampDirectionToHorizon(float observerRadius, vec3 dirWorld, out bool clamped) {
+    float horizonCos = observerRadius > EARTH_RADIUS
+        ? -sqrt(max((observerRadius - EARTH_RADIUS) * (observerRadius + EARTH_RADIUS), 0.0)) / observerRadius
+        : 0.0;
+
+    clamped = dirWorld.y < horizonCos;
+    if (!clamped)
+        return dirWorld;
+
+    vec2 horizontal = dirWorld.xz;
+    float hLen = length(horizontal);
+    horizontal = hLen < 1e-4 ? vec2(1.0, 0.0) : horizontal / hLen;
+    float horizonSin = sqrt(max(1.0 - horizonCos * horizonCos, 0.0));
+    return vec3(horizontal.x * horizonSin, horizonCos, horizontal.y * horizonSin);
+}
+
 // 起点沿给定方向到大气顶的 RGB 消光光学深度；球对称大气只依赖起点半径与方向天顶余弦。
 // composite12 的 LUT 生成端在 vsh 中对太阳 / 月亮各算一次，经 varying 传入全部 LUT texel；
 // 表面直射光的 solarTransmittance 同样复用，避免三套系数表达式漂移。
@@ -139,17 +163,21 @@ vec3 ambientCapture(vec3 rayleighView, vec3 mieView, vec3 tauV) {
 // 也调用本函数（不得改调含 MS 的 atmosphericRadiance：环境场会把 MS 再折进自身、双计）
 // out viewCapture = 本视线的各向同性散射截获比（atmosphericRadiance 的 MS 项与 skyAmbientField
 // 的截获比 ρ 统计共用一份 airMass，免二次求值）
+// direction 与 phaseDirection 分离（春雷 GetSkyView 的 rayDir / phaseDir 同款语义）：direction 走
+// 散射路径（airMass / tauSp 端点几何，地平线钳制时传钳后方向）、phaseDirection 只进相函数 mu（传
+// 未钳制的原始方向，保地平线以下的角向明暗）；不钳制的调用方两参传同一方向即逐位等价
 // origin 相机地心系位置、direction 视线方向（世界系，须归一化）、lightDirection 光源方向（同系归一化，太阳 / 月亮通用）、
 // t 视线行星命中距离（SKY_NO_HIT = 朝天）、lightOpticalDepth 为起点沿光源方向到大气顶的消光
 //（LUT 生成端在 vsh 中预计算）、irradiance 大气顶光源辐照度（SOLAR_IRRADIANCE / MOON_IRRADIANCE）
-vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 lightDirection,
+vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 phaseDirection, vec3 lightDirection,
                                vec3 lightOpticalDepth, float t, vec3 irradiance,
                                out vec3 viewCapture) {
     vec3  zenith = normalize(origin);
     float r   = length(origin);
     float z   = dot(direction, zenith);
     float zS  = dot(lightDirection, zenith);
-    float mu  = dot(lightDirection, direction);
+    float mu  = dot(lightDirection, phaseDirection);
+    float muRay = dot(lightDirection, direction);
 
     // 视线路径（相机 -> t）的各介质 air mass：散射项与消光项共用（Rayleigh 散射 = 消光，Mie 消光 = 散射 × 1.11）
     vec3 rayleighView = RAYLEIGH_SCATTERING_COEFFICIENTS  * airMass(r, z, t, RAYLEIGH_SCALE_HEIGHT);
@@ -160,11 +188,12 @@ vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 lightDirection,
     // 起点沿光源方向到大气顶的消光（日落红化的来源）；同一半区所有 texel 共用 vsh 预计算值。
     vec3 tauS = lightOpticalDepth;
 
-    // 视线终点沿太阳方向到大气顶的消光，天空射线（未命中）取 0
+    // 视线终点沿太阳方向到大气顶的消光，天空射线（未命中）取 0；zSp 端点几何跟射线方向
+    //（muRay 而非相位 mu——dot(lightDir, P̂) 的几何关系属于路径，不属于角分布）
     vec3 tauSp = vec3(0.0);
     if (t < 1e29) {
         float rP  = sqrt(t * t + 2.0 * z * r * t + r * r);
-        float zSp = (zS * r + mu * t) / rP;
+        float zSp = (zS * r + muRay * t) / rP;
         tauSp = opticalDepthToSpace(rP, zSp);
     }
 
@@ -205,7 +234,8 @@ vec3 skyAmbientField(float observerRadius, vec3 lightWorld,
                      + (axisU * cos(phi) + axisV * sin(phi)) * sinTheta;
             float t = planetHitDistance(observerRadius, dir.y);
             vec3 capture;
-            fieldSum += atmosphericRadianceSingle(origin, dir, lightWorld, lightOpticalDepth,
+            // 求积方向两参同值（环境场是球面平均的物理量，不钳制——地平线下的暗贡献本就应计入）
+            fieldSum += atmosphericRadianceSingle(origin, dir, dir, lightWorld, lightOpticalDepth,
                                                   t, irradiance, capture);
             captureSum += capture;
         }
@@ -218,12 +248,12 @@ vec3 skyAmbientField(float observerRadius, vec3 lightWorld,
 // 单次 + 多次散射天光（线性 HDR，未乘 SKY_BRIGHTNESS）：单次散射 + 各向同性环境场沿视线
 // 的再散射（ambientCapture × ambientField × SKY_MS_STRENGTH，强度 0 = 退回纯单次散射）；
 // ambientField = skyAmbientField 的预计算值（vsh 每帧每光源一次、经 varying 传入），
-// 其余参数与 atmosphericRadianceSingle 一致
-vec3 atmosphericRadiance(vec3 origin, vec3 direction, vec3 lightDirection,
+// direction / phaseDirection 的分离语义与 atmosphericRadianceSingle 一致（钳制路径 + 未钳制相位）
+vec3 atmosphericRadiance(vec3 origin, vec3 direction, vec3 phaseDirection, vec3 lightDirection,
                          vec3 lightOpticalDepth, float t, vec3 irradiance,
                          vec3 ambientField) {
     vec3 viewCapture;
-    vec3 single = atmosphericRadianceSingle(origin, direction, lightDirection,
+    vec3 single = atmosphericRadianceSingle(origin, direction, phaseDirection, lightDirection,
                                             lightOpticalDepth, t, irradiance, viewCapture);
     return single + viewCapture * ambientField * SKY_MS_STRENGTH;
 }

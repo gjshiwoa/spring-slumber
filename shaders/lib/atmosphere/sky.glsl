@@ -1,6 +1,6 @@
 // 天空颜色（线性 HDR）——Chapman 解析大气 + 环境场多次散射（atmosphere.glsl）的管线封装
-// deferred_init 天空像素（depth >= 1）经 sky-view LUT 采样；同一物理核心供雾 / 直射光着色 /
-// 环境光 / 水面反射扩展复用。当前太阳 + 月亮双光源、晴天（MC 日月恰好相对；月亮辐照度 = 太阳
+// deferred_init 天空像素（depth >= 1）经 sky-view LUT 采样；同一物理核心供直射光着色 /
+// 环境光 / 未来水面反射复用。当前太阳 + 月亮双光源、晴天（MC 日月恰好相对；月亮辐照度 = 太阳
 // × 1/2000；星星 / 雨天为扩展点）
 //
 // sky-view LUT（移植自春雷 Hillaire 非线性参数化，Sébastien Hillaire, EGSR 2020）：每帧在
@@ -10,7 +10,8 @@
 //   a ∈ [0,1] 方位角（sqrt 使纹素向光源侧集中，分辨率 SKYVIEW_LUT_W = 200）、
 //   v ∈ [0,1] 天顶角（上 / 下半段各一段 sqrt 使纹素向地平线集中，分辨率 SKYVIEW_LUT_H = 100）、
 //   参数域线性映射首末纹素中心（半纹素内缩）：采样不越区域边界、与相邻槽位不串色
-// 依赖由接入的 program 先行 include：uniforms.glsl（sunPosition / moonPosition / colortex7 /
+// 依赖由接入的 program 先行 include：uniforms.glsl（sunPosition / moonPosition / colortex7 的
+//   gaux4 别名——本文件采样一律走 gaux 名，gbuffers 阶段亦可同样采样 /
 //   cameraPosition / rainStrength）、constants.glsl（TAU、大气常量、SKYVIEW_*、SUN_DISK_*）、
 //   utils/space.glsl（viewToWorldDirection）、atmosphere.glsl（物理核心，仅解析路径与 LUT 生成端
 //   使用 + getSunDisk 的 planetHitDistance / opticalDepthToSpace）
@@ -34,7 +35,7 @@ vec3 moonDirectionWorld() {
 // LUT 全区域矩形（缓冲归一化坐标，xy = 原点、zw = 边长）：锚定缓冲底边（texel y ∈ [0, 200)）、
 // 预留天空盒右侧（SKYVIEW_LUT_ORIGIN_X）；composite12 的 vsh 光栅包围盒扩展与采样端共用
 vec4 skyViewLutRegionRect() {
-    vec2 texel = 1.0 / vec2(textureSize(colortex7, 0));
+    vec2 texel = 1.0 / vec2(textureSize(gaux4, 0));
     vec2 origin = vec2(float(SKYVIEW_LUT_ORIGIN_X), 0.0) * texel;
     vec2 size = vec2(float(SKYVIEW_LUT_W), float(2 * SKYVIEW_LUT_H)) * texel;
     return vec4(origin, size);
@@ -92,7 +93,7 @@ float skyViewLutAzimuthParam(vec3 dirWorld, vec3 lightWorld) {
 vec3 sampleSkyViewLutHalf(vec4 rect, vec2 param) {
     vec2 localUv = vec2(lutParamToTexelCenter(param.x, float(SKYVIEW_LUT_W)),
                         lutParamToTexelCenter(param.y, float(SKYVIEW_LUT_H)));
-    return textureLod(colortex7, rect.xy + localUv * rect.zw, 0.0).rgb;
+    return textureLod(gaux4, rect.xy + localUv * rect.zw, 0.0).rgb;
 }
 
 // LUT 尚未生成或缓冲重建时的轻量天空：只在首帧 / 无效槽位使用，不替代正常 Chapman 天空。
@@ -103,7 +104,7 @@ vec3 fallbackSkyColor(vec3 dirWorld, vec3 sunDirWorld) {
     return ambientRadiance * (0.45 * SKY_BRIGHTNESS * hemisphere);
 }
 
-// 天空色采样入口（deferred_init 天空分支 / 未来雾、反射经此走 LUT）
+// 天空色采样入口（deferred_init 天空分支 / 未来反射经此走 LUT）
 // dirView 视图空间方向（不要求归一化）；光源方向 / horizon / lutValid 均由调用方从 vsh 帧数据
 // 传入；返回线性 HDR，SKY_BRIGHTNESS 已在生成端乘入。日 / 月两半区和式（春雷同构），非活动半区
 //（光源低于 SKY_LIGHT_MIN_HEIGHT、生成端整区写 0）以同一常量门控跳过参数化与 fetch——不变式
@@ -159,11 +160,23 @@ vec3 getSunDisk(vec3 dirView, vec3 sunDirWorld) {
 // 解析天色（世界系方向直接求值 Chapman + 环境场 MS）：LUT 生成核心，也是解析路径的完整保留。
 // observerRadius / lightOpticalDepth / ambientField（atmosphere.glsl 的 skyAmbientField）由
 // composite12 vsh 每帧预计算，避免每个 LUT texel 重复相机半径、光源路径 Chapman 与 48 节点求积
+// SKY_CLAMP_TO_HORIZON（春雷 GetSkyView 同位语义）：地平线以下方向的散射路径钳到与地球正好相切的
+// 观察者地平线切线、钳后射线一律按未命中求值（机制与刀锋数值防护见 atmosphere.glsl 的
+// clampDirectionToHorizon 头注）；相位透传未钳制的 dirWorld——Rayleigh / Mie 的 mu 保角向变化，
+// 地平线以下的 LUT 行因此 = 地平线辉光 × 按真实方向的相位调制，采样端（getSkyColor）零改动
 vec3 skyRadianceAnalytic(float observerRadius, vec3 dirWorld, vec3 lightWorld,
                          vec3 lightOpticalDepth, vec3 irradiance, vec3 ambientField) {
     vec3 origin = vec3(0.0, observerRadius, 0.0);
-    float t = planetHitDistance(observerRadius, dirWorld.y);
-    return atmosphericRadiance(origin, dirWorld, lightWorld, lightOpticalDepth, t, irradiance,
+    vec3 rayDir = dirWorld;
+    float t;
+#ifdef SKY_CLAMP_TO_HORIZON
+    bool clampedToHorizon;
+    rayDir = clampDirectionToHorizon(observerRadius, dirWorld, clampedToHorizon);
+    t = clampedToHorizon ? SKY_NO_HIT : planetHitDistance(observerRadius, rayDir.y);
+#else
+    t = planetHitDistance(observerRadius, rayDir.y);
+#endif
+    return atmosphericRadiance(origin, rayDir, dirWorld, lightWorld, lightOpticalDepth, t, irradiance,
                                ambientField)
          * SKY_BRIGHTNESS;
 }

@@ -6,7 +6,7 @@
 // 本 pass 时间累积把 32 相位采样解析成亚像素抗锯齿；天空锚点走无穷远方向仅旋转重投影、线性深度
 // 取哨兵进同一置信公式（天空↔天空满置信、天空↔几何自然归零，免分支）
 // 钳制域曝光归一化（春雷同思路）：统计 / 钳制 / 混合在「线性色 × 上一帧自适应曝光」工作域进行、
-// 结果除回——本管线曝光在 final 才应用，colortex0 暗景原始值极小、σ 跌破 epsilon 地板会使钳制盒
+// 结果除回——本管线曝光在 final 才应用，colortex6 暗景原始值极小、σ 跌破 epsilon 地板会使钳制盒
 // 退化成不钳 → 低亮度拖影；乘曝光后工作域稳定在 ~0.2-1
 // TAAU：几何渲染在左下 [0,S]² 子区域，本 pass quad 全屏、即上采样器——resolveTAA 把目标域 uv/pixel
 // 换算为渲染域（见函数内注释），当前帧 catmullRom5 上采样做半抖去抖（c13 / Kappa / Photon 三家一致）
@@ -17,7 +17,7 @@
 // fetch 预算：几何最坏 TAAU 21 / 原生 17；天空像素当前帧上采样与历史双降 bilinear（各 5→1）后
 // 两档均 13——天空是 sky-view LUT 双线性平滑场、锐化无负载（依据见 resolveTAA 内注释），
 // 换来整段几何像素成本 ×S²
-// 依赖先行 include：constants.glsl（TAA_*）、uniforms.glsl（colortex0/3、depthtex0、视口、
+// 依赖先行 include：constants.glsl（TAA_*）、uniforms.glsl（colortex6/3、depthtex0、视口、
 // cameraPosition 系与 previous 系矩阵）、utils/color.glsl、filters.glsl（catmullRom5）、
 // utils/space.glsl（screenToView / viewToRelativeWorld / relativeWorldToPreviousScreen /
 // viewDirectionToPreviousScreen）；jitter 补偿与曝光由调用方传参（composite_taa 经 varying）
@@ -35,7 +35,7 @@ const ivec2 taaCrossOffsets[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1)
 // 重投影锚点取最近片元，避免边缘处前景 / 背景速度串扰；返回值 z >= 1 即十字全空（纯天空内部，
 // 调用方切换无穷远方向重投影）；中心深度由调用方传入（免重复 fetch）；不含对角——仅对角有几何的
 // 单像素角点不受保护（同上取舍）
-// resolution 显式传入：TAAU 下 depthtex0 / colortex0 的有效区是左下 [0,S]² 渲染子区域，锚点十字
+// resolution 显式传入：TAAU 下 depthtex0 / colortex6 的有效区是左下 [0,S]² 渲染子区域，锚点十字
 // 与邻域统计都须在渲染域分辨率内进行（S=1 时即 viewWidth/Height，恒等）；返回 xy 为渲染域 uv
 //（视场归一化 [0,1]，与 screenToView / 重投影的域约定一致）
 vec3 closestDepthCross(ivec2 pixel, float centerDepth, ivec2 resolution) {
@@ -89,19 +89,19 @@ vec3 taaInverseTonemap(vec3 color) {
 // outClipDistance：Karis「距盒边距离」∈ [0,1]（Kappa / Photon 同式）——历史被截 → 0（与当前
 // 邻域不符，当前帧正常注入收敛）；稳居盒内 → 1（与当前邻域一致，调用方据此把当前帧权重压向 0
 // 防闪）。工作域已含曝光归一化，距离直接乘增益、不再乘曝光
-// resolution 显式传入：TAAU 下为渲染域分辨率——统计十字采样子区域内的 colortex0；统计盒按
+// resolution 显式传入：TAAU 下为渲染域分辨率——统计十字采样子区域内的 colortex6；统计盒按
 // 渲染像素间隔覆盖 ±1/S 目标像素、天然宽于原生档，γ 维持原值即够
 vec3 clipHistoryToNeighborhood(vec3 historyColor, ivec2 pixel, float clipGamma, float exposure, ivec2 resolution,
                                 out float outClipDistance) {
     ivec2 bounds = resolution - 1;
 
-    vec3 centerColor = rgbToYCoCg(taaTonemap(texelFetch(colortex0, pixel, 0).rgb * exposure));
+    vec3 centerColor = rgbToYCoCg(taaTonemap(texelFetch(colortex6, pixel, 0).rgb * exposure));
     vec3 m1 = centerColor;
     vec3 m2 = centerColor * centerColor;
     vec3 sampleMin = centerColor;
     vec3 sampleMax = centerColor;
     for (int i = 0; i < 4; i++) {
-        vec3 sampleColor = rgbToYCoCg(taaTonemap(texelFetch(colortex0, clamp(pixel + taaCrossOffsets[i], ivec2(0), bounds), 0).rgb * exposure));
+        vec3 sampleColor = rgbToYCoCg(taaTonemap(texelFetch(colortex6, clamp(pixel + taaCrossOffsets[i], ivec2(0), bounds), 0).rgb * exposure));
         m1 += sampleColor;
         m2 += sampleColor * sampleColor;
         sampleMin = min(sampleMin, sampleColor);
@@ -155,7 +155,7 @@ float catmullConfidence(vec2 f) {
          * max(max(w0.y, w1.y), max(w2.y, w3.y));
 }
 
-// 读当前线性 colortex0 + depthtex0，重投影采 colortex3 历史，钳制混合后返回新颜色（已除回归一化曝光）；
+// 读当前线性 colortex6 + depthtex0，重投影采 colortex3 历史，钳制混合后返回新颜色（已除回归一化曝光）；
 // outHistoryDepth 输出本帧最近片元线性深度（随颜色一起写进历史 a 通道供下帧置信比对）；
 // exposure 为上一帧自适应曝光（调用方经 varying 传入），仅作钳制域归一化、不影响输出 / 存储的亮度
 vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float outHistoryDepth) {
@@ -199,7 +199,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     //   下界 0.25 texel：左 / 下缘即缓冲物理边缘，越界 tap 由引擎 clamp-to-edge 重复纹素 0（本帧
     //   有效内容）兜底；余量刻意小保住屏幕左 / 下缘列的逐帧 jitter 相位（时间抗锯齿）
     //   上界内缩 2.5 texel：catmullRom5 外侧 tap 达 centerPosition+2（核半径 2），采样中心离子区域
-    //   右 / 上缘不足 2.5 texel 时必有 tap 越过本帧写入区。子区域外的 colortex0 是上帧 composite_taa
+    //   右 / 上缘不足 2.5 texel 时必有 tap 越过本帧写入区。子区域外的 colortex6 是上帧 composite_taa
     //   的**全屏输出**——该缓冲坐标同时是目标域 uv≈S，内容对应源场景 S²≈0.49 FOV 处，与边缘的
     //   真实视场（源 uv≈S）完全是两处画面：越界 tap 读到「别处的画面」，静止时贴边一条固定异色
     //   细线、运动时逐帧错位成一行 / 列白边（右 / 上缘独有；左 / 下缘贴缓冲边无此问题，TAAU 关闭
@@ -219,9 +219,9 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     // 锐度关键带不受影响
     vec3 currentColor;
     if (isSky) {
-        currentColor = textureLod(colortex0, upsampleUV, 0.0).rgb * exposure;
+        currentColor = textureLod(colortex6, upsampleUV, 0.0).rgb * exposure;
     } else {
-        currentColor = catmullRom5(colortex0, upsampleUV,
+        currentColor = catmullRom5(colortex6, upsampleUV,
                                    vec2(viewWidth, viewHeight),
                                    TAAU_UPSAMPLE_SHARPNESS).rgb * exposure;
     }
@@ -231,7 +231,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
 #else
     // 原生档半 jitter 补偿（c13 / 春雷同款）：几何 +jitter 后像素含 center+j 处场景，采样向 jitter
     // 方向偏一半——抗锯齿收敛与锐度折中
-    vec3 currentColor = textureLod(colortex0, uv + jitterUV * 0.5, 0.0).rgb * exposure;
+    vec3 currentColor = textureLod(colortex6, uv + jitterUV * 0.5, 0.0).rgb * exposure;
 #endif
 
     // 锚点观察空间位置只重建一次：线性深度与重投影共用（原先各做一次 mat4 乘 + 透视除）；

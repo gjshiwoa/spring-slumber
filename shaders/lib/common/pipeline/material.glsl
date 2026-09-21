@@ -1,6 +1,8 @@
-// gbuffer 写入侧材质判定（与 gbuffer_data.glsl 的读取端工具相对）
-// 依赖 lib/common/globals/constants.glsl（PLANT_*）、lib/common/utils/space.glsl（viewToWorldDirection，
-// 依赖的 uniforms 由 uniforms.glsl 提供），由 program 在本文件之前 include
+// gbuffer 写入侧：材质判定 + colortex4/5 打包输出（与 gbuffer_data.glsl 的读取端工具相对）
+// 依赖先行 include：lib/common/globals/constants.glsl（PLANT_* / MATERIAL_*）、
+//   lib/common/globals/uniforms.glsl（normals / specular）、lib/common/utils/space.glsl（viewToWorldDirection /
+//   calculateTBN）、lib/common/utils/packing.glsl（pack4x8To2x16 / encodeOctahedral），
+//   由 program 在本文件之前 include
 #ifndef LIB_MATERIAL_GLSL
 #define LIB_MATERIAL_GLSL
 
@@ -32,5 +34,29 @@ bool isLikelyPlantTriangle(vec3 viewPos[3], vec4 vertexColor[3]) {
 
     return verticalCrossPanel || tinted;
 }
+
+// ---- gbuffer 打包写入（gbuffers_opaque / entities / 前向半透明的「deferred 之前」路径共用）----
+// 仅片段阶段（导数 TBN 与贴图采样；vsh / gsh 编译不展开，isLikelyPlantTriangle 独立可用）
+#ifdef STAGE_FRAGMENT
+
+// 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
+// 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)、结果即导数几何法线。调用纪律：dp / duv 导数必须在
+// discard 之前集中求好传入（discard 后 quad 内幸存像素的导数未定义）
+vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord) {
+    mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
+    return normalize(tbn * (texture(normals, texCoord).rgb * 2.0 - 1.0));
+}
+
+// colortex4 输出：rg = 打包 albedo（rgba 已带标记位 a）、ba = 打包高光贴图 RGBA（labPBR 全量）
+vec4 packGbufferMaterial(vec4 texcolorMarked, vec2 texCoord) {
+    return vec4(pack4x8To2x16(texcolorMarked), pack4x8To2x16(texture(specular, texCoord)));
+}
+
+// colortex5 输出：rg = 八面体观察空间法线、ba = 原始 lmcoord（读取端 remapLightmap）
+vec4 packGbufferDetail(vec3 viewNormal, vec2 lmcoordRaw) {
+    return vec4(encodeOctahedral(viewNormal), lmcoordRaw);
+}
+
+#endif
 
 #endif

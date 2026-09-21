@@ -1,5 +1,5 @@
 // 不透明 gbuffer: gbuffers_opaque
-// 不透明阶段，MRT 写两张（colortex0/1 不写，颜色由 deferred_init 解包 colortex4 后写出）：
+// 不透明阶段，MRT 写两张（不写主颜色——colortex6 由 deferred_init 解包 colortex4 后写出）：
 //   colortex4 = rg 打包 albedo（tex × 顶点色，4x8→2x16；a 通道在 cutout 判定后复用为物品标记
 //               MATERIAL_*——vsh 先写 block.properties 显式标记（草方块 → MATERIAL_SOLID 排除），
 //               terrain 入口空标记时由下方 gsh 段程序化判定植被），ba 打包高光贴图 RGBA（4x8→2x16）
@@ -14,8 +14,8 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
-#include "/lib/common/pipeline/material.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/pipeline/material.glsl"
 #include "/lib/common/utils/noise.glsl"
 
 // terrain 入口挂几何着色器（OPAQUE_GSH 由 world0/gbuffers_terrain.vsh 定义，block / hand 不定义）：
@@ -64,16 +64,11 @@ void main() {
     // alpha 的 cutout 职责已尽，a 通道槽位改存物品标记（随 pack4x8To2x16 一同压缩进 colortex4.rg）
     color.a = vMaterialID;
 
-    // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
-    // 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)，变换后即导数几何法线
-    mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
-    vec3 viewNormal = normalize(tbn * (texture(normals, vTexCoord).rgb * 2.0 - 1.0));
-
-    // 高光贴图 RGBA 全量打包（labPBR: r smoothness / g F0 / b porosity·SSS / a emissive）
-    vec4 specularMap = texture(specular, vTexCoord);
-
-    outMaterial = vec4(pack4x8To2x16(color), pack4x8To2x16(specularMap));
-    outDetail = vec4(encodeOctahedral(viewNormal), vLmcoord); // lmcoord 存原始值
+    // 观察空间法线与打包输出（函数在 lib/common/pipeline/material.glsl，与 entities / 前向半透明
+    // 的「deferred 之前」路径共用；调用纪律：导数先于 discard 已求好）
+    vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);
+    outMaterial = packGbufferMaterial(color, vTexCoord);
+    outDetail = packGbufferDetail(viewNormal, vLmcoord); // lmcoord 存原始值
 }
 
 #endif

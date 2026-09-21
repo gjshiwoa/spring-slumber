@@ -98,6 +98,11 @@ void main() {
     } else if (pixel == exposureTexel()) {
         // 自动曝光寄生存储：仅槽位 1 texel 付测光成本
         outMisc = vec4(adaptedExposure(targetExposure(sceneAverageLuminance())), 0.0, 0.0, 1.0);
+    } else if (pixel == PASS_ORDER_MARKER_TEXEL) {
+        // pass 顺序标记复位（诊断，机制见 lib/common/pipeline/pass_order_marker.glsl）：deferred_init
+        // 帧中写 1、此处帧末归零——下一帧 gbuffers 读 0 = deferred 之前执行；复位须在透传分支前
+        //（透传会把 1 保留到下帧）
+        outMisc = vec4(0.0);
     } else {
         // 其余像素：包围盒内同位置读回透传保持既有内容（本 pass 是 colortex7 唯一写入者、
         // 区域整写保值），包围盒外光栅带无槽位无读者、写 0 免回读

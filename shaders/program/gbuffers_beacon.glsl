@@ -40,7 +40,7 @@ void main() {
     if (outsideRenderRegion()) discard;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
 
-    vec4 previousMaterial = texelFetch(colortex4, ivec2(gl_FragCoord.xy), 0);
+    vec4 previousMaterial = texelFetch(gaux1, ivec2(gl_FragCoord.xy), 0);
 
     if (color.a < ALPHA_BEACON_CORE) {
         // 半透明外壳：手动合成进打包 albedo，背景 specular / 法线 / lm 原样写回
@@ -48,7 +48,7 @@ void main() {
         vec3 previousColor = unpack2x16To4x8(previousMaterial.rg).rgb;
         color.rgb = mix(previousColor, color.rgb, color.a);
         outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), previousMaterial.ba);
-        outDetail = texelFetch(colortex5, ivec2(gl_FragCoord.xy), 0);
+        outDetail = texelFetch(gaux2, ivec2(gl_FragCoord.xy), 0);
     } else {
         // 不透明核心：自发光整像素写 gbuffer（光柱非植被，标记槽位置空）
         vec3 viewNormal = geomNormalFromDerivatives(dp1, dp2);

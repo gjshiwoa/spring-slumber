@@ -1,8 +1,8 @@
 // TAA 解析 pass: composite_taa（composite3 入口；vsh = 通用全屏 vsh，本 program 无自定义 vsh 段，
 // fsh 按需声明同名 in）。位于全部 gbuffers（含 deferred 后的前向半透明）之后、bloom 链之前：
-// 读抖动后的线性 colortex0 与 depthtex0，重投影采 colortex3 历史、方差钳制 + 置信度混合后写回
-// colortex0（TAAU 时为上采样后的全屏目标分辨率，机制见 lib/post/taa.glsl），混合色 + 本帧锚点
-// 线性深度写 colortex3 供下帧（DRAWBUFFERS:03 单程序独占 ping-pong，不依赖 flip.*）；bloom 图集
+// 读抖动后的线性 colortex6 与 depthtex0，重投影采 colortex3 历史、方差钳制 + 置信度混合后写回
+// colortex6（TAAU 时为上采样后的全屏目标分辨率，机制见 lib/post/taa.glsl），混合色 + 本帧锚点
+// 线性深度写 colortex3 供下帧（DRAWBUFFERS:63 单程序独占 ping-pong，不依赖 flip.*）；bloom 图集
 // 与自动曝光测光自此吃抗锯齿后的稳定图像。TAAU 下 quad 保持全屏——本 pass 是上采样器，与缩进
 // 子区域的 deferred_init（FULLSCREEN_RENDER_REGION）分工
 // 曝光归一化：本帧曝光要到 composite12 才写入，这里读 colortex7 槽位拿到的是上一帧适应值——
@@ -17,20 +17,21 @@
 #include "/lib/post/bloom.glsl"
 #include "/lib/common/utils/noise.glsl"
 #include "/lib/post/exposure.glsl"
+#include "/lib/lighting/ambient.glsl"
 #include "/program/fullscreen_vsh.glsl"
 #include "/lib/post/taa.glsl"
 
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
-/* DRAWBUFFERS:03 */
+/* DRAWBUFFERS:63 */
 
 // 通用全屏 vsh 输出的帧数据——按需 in 声明
 in vec2 vTexCoord;   // 全屏 uv
 in vec2 vJitter;     // 当前帧 jitter（uv 域），resolveTAA 的解析参数
 in float vExposure;  // 上一帧自适应曝光（composite12 尚未执行，槽位为上帧适应值），钳制域归一化用
 
-layout(location = 0) out vec4 outColor;   // colortex0：解析后的场景颜色
+layout(location = 0) out vec4 outColor;   // colortex6：解析后的场景颜色
 layout(location = 1) out vec4 outHistory; // colortex3：rgb = 混合色，a = 本帧锚点线性深度
 
 void main() {

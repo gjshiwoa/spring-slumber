@@ -84,7 +84,7 @@ vec3 shadeSurface(vec3 albedo, vec3 normalView, vec2 lm, vec3 viewPos, vec3 dire
     vec3 skyIrradiance = vSkyAmbient * (lmPow4.y * hemisphere);
 
     // 方块光（火把、萤石等），近距离衰减用幂曲线近似（辐照度形式）；线性小地板用原始 lm.x
-    vec3 blockIrradiance = TORCHLIGHT_COLOR * (lmPow4.x * 1.30 + lm.x * 0.02);
+    vec3 blockIrradiance = TORCHLIGHT_COLOR * (lmPow4.x * TORCHLIGHT_NEAR_SCALE + lm.x * TORCHLIGHT_FLOOR_SCALE);
 
     // Lambert BRDF = albedo/π，全部辐照度一次相乘（直射余弦取 wrap 重映射值）
     return (albedo / PI) * (directIrradiance * (ndlWrapped * shadowVis)
