@@ -1,7 +1,8 @@
 // 阴影贴图采样核心（路线与分档依据见 AGENTS.md「阴影贴图」条 / constants.glsl 阴影分区）：
 // 线性 distortion + shadowtex0 硬件比较黄金螺旋 PCF（temporal bayer 时域旋转，composite_taa
 // 时间累积收敛为软阴影）+ shadowtex1 裸深度手动比较分离半透明遮挡、取 shadowcolor0 透射色
-// 上彩色阴影（春v2 getColorShadow 同款）。扭曲 / 压缩换算在 utils/space.glsl（写读两侧共用）。
+// 上彩色阴影（春v2 getColorShadow 同款）——水面透射为焦散（a 通道水标记 ×WATER_CAUSTICS_BOOST
+// 重建 HDR，写入端 lib/lighting/caustics.glsl + program/shadow.glsl）。
 // PCSS 后路：tex1 保持裸深度，未来加 blocker search（读 tex1 浅于接收者的平均遮挡深度推半影
 // 半径、替换常数半径）即升级，引擎配置零改动。
 // 另含屏幕空间追踪阴影 screenSpaceShadowVisibility（SHADOW_SCREEN_SPACE 开关，方案见
@@ -81,7 +82,15 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
                                    ivec2(0), ivec2(shadowMapResolution - 1));
             float opaqueVis = step(shadowPos.z, texelFetch(shadowtex1, tapTexel, 0).r);
             if (opaqueVis > 0.0) {
-                tapVisibility = mix(srgbToLinear(texelFetch(shadowcolor0, tapTexel, 0).rgb), vec3(1.0), allVis);
+                vec4 transmit = texelFetch(shadowcolor0, tapTexel, 0);
+                // 水焦散透射（a 通道水标记，写入端 program/shadow.glsl）：rgba8 上限 1，rgb = tint ×
+                // 已 shaping 的网强度，读取端 ×BOOST 重建 >1 的 HDR 焦点（下游 colortex6 线性域）；
+                // 不走 srgbToLinear——存储值即线性透射因子、曲线已含在写入端，gamma 会二次压暗网谷。
+                // 其余透射几何维持 sRGB albedo → 线性
+                vec3 transmission = transmit.a < SHADOW_COLOR_WATER_TEST
+                                  ? transmit.rgb * WATER_CAUSTICS_BOOST
+                                  : srgbToLinear(transmit.rgb);
+                tapVisibility = mix(transmission, vec3(1.0), allVis);
             }
         }
         visibilitySum += tapVisibility;

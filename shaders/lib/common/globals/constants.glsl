@@ -14,7 +14,7 @@ const float TAU            = 6.28318530718;
 const float PI             = TAU * 0.5;
 const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
 const float GOLDEN_RATIO    = 0.61803398875; // 黄金比例共轭 1/φ（春v2 同值）：temporal 噪声帧间相位偏移（noise.glsl）
-const float ALPHA_CUTOUT   = 0.5;           // cutout 透贴裁剪阈值
+const float ALPHA_CUTOUT   = 0.1;           // cutout 透贴裁剪阈值
 const float ambientOcclusionLevel = 1.0;    // 引擎指令：原版平滑光照 AO 强度（缩放引擎烙进顶点色 rgb 的暗角，随 albedo 打包进 colortex4；0 = 关闭）
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
 const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上限 = MIN + SPAN = 31/32）
@@ -140,6 +140,18 @@ const float CLOUDS_2D_FADE_DISTANCE = 24000.0; // 距离衰减 exp 尾长（米�
 const float CLOUDS_2D_BRIGHTNESS    = 1.25;    // 云亮度（春v2 取 3.5 按其 sunColor 量级；本包直射辐照度 ≈ 236、白地形 E/π ≈ 75，取 1.25 → 正午云 ≈ 100~150 略亮于白地形、AgX 滚落；进游戏按观感微调）
 #endif
 
+// ---- 边界雾（lib/atmosphere/fog.glsl，接入 = composite_fog / composite2 槽；距离 / 天顶角双因子、雾色取天空 LUT）----
+// 渲染边界处的融接雾：远处地形 / 水面 / 天空溶进地平线色、视距边缘无接缝；非物理雾（无光照
+// 方向性 / 高度衰减，纯边界融接）。开关宏与数值常量分离（TAAU 同纪律）；删宏 = fog.glsl 编译为空 +
+// composite_fog 整 pass 透传旁路（colortex6 同位置 fetch 原样写回——discard 会因引擎缓冲翻转
+// 黑屏，见 composite_fog.glsl）
+#define BOUNDARY_FOG
+#ifdef BOUNDARY_FOG
+const float BOUNDARY_FOG_START  = 0.70; // 雾起始距离（×far）：约 0.7 倍视距外起雾
+const float BOUNDARY_FOG_END    = 0.90; // 雾满强距离（×far）：0.9·far 外距离因子饱和为 1
+const float BOUNDARY_FOG_ZENITH = 0.40; // 天顶淡出上沿（视线世界 y = sin 仰角，初值 0.5）：0（地平线）满雾 → 0.4（仰角约 23.6°）零雾——雾带只贴地平线、抬头即散（2026-09 按反馈下调）
+#endif
+
 // ---- 信标光柱（gbuffers_beacon，春雷同值）----
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
 const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写入 specular.a，labPBR emissive）
@@ -148,21 +160,45 @@ const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写
 // a 通道在 cutout 判定后职责已尽、复用为物品类型标记，随 pack4x8To2x16 一同压缩（读取端
 // unpack2x16To4x8(...).a × 255 判定）；编号对齐春雷 objectMarker 系（251 起），253~255 预留显式标记扩展
 const float MATERIAL_NONE       = 0.0;           // 无标记；texcolor 经半透明混合的程序（entityColor / 手动合成）混合只影响 rgb，a 整像素置空
-const float MATERIAL_VEGETATION = 251.0 / 255.0; // 植被：gbuffers_opaque gsh 程序化判定（春雷 objectMarkerPlantGeometry 同位）
-const float MATERIAL_SOLID      = 252.0 / 255.0; // 显式排除（block.properties → mc_Entity，vsh 写入）：gsh 见非空标记不再兜底、SSS 取 0（草方块染色顶面的 chroma 误报由本标记压制）
-// 程序化判据阈值（春雷 isLikelyPlantTriangle 同值）：「垂直交叉面片」或「生物群系染色」取或
-const float PLANT_PANEL_MAX_Y     = 0.2;  // 三角形几何法线竖直分量上限——面片垂直地面（草 / 花 / 苗的十字交叉模型）
-const float PLANT_PANEL_DIAGONAL  = 0.55; // 法线 xz 分量 min/max 比下限——原版交叉面片两两正交再整体斜置 45°，法线落在对角方向；轴对齐墙面 / 门板达不到
-const float PLANT_TINT_CHROMA_MIN = 0.06; // 三顶点平均顶点色 chroma（max−min 分量差）下限——草 / 树叶带生物群系绿染色，未染色几何顶点色近灰
+const float MATERIAL_VEGETATION = 251.0 / 255.0; // 植被：block.properties 显式列表 → mc_Entity → vsh 判定（春v2 IDMapping 同款五族，见 material.glsl 的 isVegetationId）；252 空缺、253~255 预留
 
 // ---- block.properties 自定义方块 ID（mc_Entity.x；未定义方块 = -1）----
-// ID 数值与 shaders/block.properties 成对维护（两文件无法互相引用，增改须两端同步）；
-// 取值对齐 OptiFine 有符号 16 位，自定义段从 10001 起。
-// **block.properties 恒纯 ASCII、零 # 注释行**：Iris 加载前先用 C 预处理器（JCPP）过一遍 properties，
+// ID 数值与 shaders/block.properties 成对维护（两文件无法互相引用，增改须两端同步）。
+// **block.properties 恒纯 ASCII、零注释行**：Iris 加载前先用 C 预处理器（JCPP）过一遍 properties，
 // # 开头的行按预处理指令解析、非 ASCII 字节直接 Bad token 抛异常，整份 ID 图随加载一起丢失
 //（mc_Entity 全 -1、显式标记静默失效——Iris 1.10.9 实测踩坑；GLSL 文件的中文注释在 // 注释内、不受影响）。
-// 说明文字写在本注释与 AGENTS.md，不写进 properties 本体
-const float BLOCK_GRASS_BLOCK = 10001.0; // 草方块 → MATERIAL_SOLID（退出植被 SSS：整方块无薄片透光，染色顶面系 chroma 误报）
+// 说明文字写在本注释与 AGENTS.md，不写进 properties 本体。
+// **方块名按版本分支 `#if MC_VERSION >= 11300`（春v2 同款列表照抄）**：1.13 扁平化改名（矮草 grass →
+// 1.20.3 short_grass，两名并列同 ID、引擎忽略未知名）；双高植物上下半用 `name:half=lower/upper`
+// blockstate 属性匹配拆开（不识别属性匹配的老加载器该行整体落空、高草回落空标记——SSS 缺失不破图）；
+// 1.12− 双高植物共用 double_plant 一个 ID（整族含向日葵 / 丁香等花，老版本粒度限制）。老分支水双写
+// 裸名 + 命名空间名：1.7 时代 properties 原生裸名，命名空间前缀为后加，老解析器二者择一命中、不认的
+// 那个跳过，双写覆盖两种解析行为；GLSL 侧 ID 数值两分支一致、常量无分支
+// 植被五族（春v2 materialIdMapper 的 IDMapping 同款，消费见 material.glsl 的 isVegetationId——
+// switch case 字面量与本段说明成对维护）：
+//   31 = 矮草 / 花 / 农作物（短植物）；10175 / 11175 = 双高植物下 / 上半（tall_grass 等，含上下两半
+//   ——高矮草由此区分）；18 = 树叶 / 藤蔓 / 海草；10176 = 其他植物 / 片状物（苗 / 蘑菇 / 甘蔗 / 藻类等）
+//   ——五族在春v2 各自驱动摇晃 / 阴影差异，本包统一映射 MATERIAL_VEGETATION（SSS 单档、无 waving）；
+//   草方块 grass_block 不在列表（整方块无薄片透光，天然空标记无 SSS，勿加入）
+const float BLOCK_WATER = 8.0; // 水 → shadow pass 焦散透射（春v2 同 ID：`water flowing_water`；消费在 program/shadow.glsl 的 shadowcolor0 写入侧，非 gbuffer a 通道标记——机制见「阴影贴图」水焦散条与 lib/lighting/caustics.glsl）
+
+// ---- 植物晃动（lib/common/pipeline/waving.glsl，宏 WAVING_PLANTS；方案移植自春v2 lib/wavingPlants.glsl，
+//      其头注归属：搜狐畅游引擎部「渲染TA实战：模型草美术效果分享」zhuanlan.zhihu.com/p/609035535）----
+// 判定复用 block.properties 五族（与 isVegetationId 同一列表）：31 / 10175 / 11175 / 18 四族晃动
+//（各族幅度与顶点覆盖见 plantWavingParams——矮草与双高植物下半仅上顶点〔根部钉地〕、双高植物上半全顶点、
+// 树叶全顶点含竖直分量）、10176 其他植物不晃（只吃 SSS）；gbuffers_opaque〔terrain〕与 shadow 两侧
+// 同一函数、同一世界锚定 → 贴图阴影随几何同步晃；删宏 = 两侧一起停晃、逐位回到静止几何
+#define WAVING_PLANTS
+const float WAVING_RATE             = 1.0;  // 晃动速率（时间轴倍率；春v2 默认档）
+const float WAVING_SHORT_AMPLITUDE  = 1.0;  // 矮草 / 花 / 苗（31 族，仅上顶点、仅水平）幅度倍率
+const float WAVING_TALL_AMPLITUDE   = 0.4;  // 双高植物（10175 仅上顶点 / 11175 全顶点，仅水平）幅度倍率
+const float WAVING_LEAVES_AMPLITUDE = 0.4;  // 树叶 / 藤蔓（18 族全顶点、含竖直）幅度倍率
+const float WAVING_NOISE_SCALE      = 1.0;  // 风场噪声尺度倍率（大 = 风团更大、空间相位更平滑）
+const float WAVING_DISTANCE         = 60.0; // 晃动距离上限（格，春v2 同值——远处晃动亚像素化无意义且费顶点）
+const float WAVING_FADE_RANGE       = 10.0; // 距离淡出带宽（本包平滑化；春v2 为硬门——按「距玩家世界距离」
+                                            // 淡出，gbuffers / shadow 两侧同式同 cameraPosition、淡出同步无错位）
+const mat2 WAVING_GUST_ROT = mat2(0.900447, -0.434966, 0.434966, 0.900447); // 阵风带朝向旋转（列主序，= 春v2 rotate2D(xz, +0.45) 逐位一致，与 CAUSTICS_ROT 互为转置〔角向相反〕）；三角值预算、编译期折叠（纪律同 CAUSTICS_ROT）
+const float WAVING_GUST_SPEED = 12.0; // 阵风带平移速度（平移坐标 格/s——快摆幅度 mask 在世界中的推进速度；旋转系 x 经 ×3 拉伸，世界系沿旋转 x 的表观速度 = 值 ÷3。春v2 默认 32，调慢为缓行观感）
 
 // ---- Bloom（lib/post/bloom.glsl，无阈值，整幅 HDR 直接进金字塔）----
 const float BLOOM_STRENGTH = 0.075; // 泛光合成强度（tonemap 前线性域加法）
@@ -174,6 +210,15 @@ const float BLOOM_WEIGHT_SUM = 3.0; // ΣBLOOM_WEIGHTS；getBloom 归一化，�
 const float AGX_ADDITIVE = 0.6;       // AgX 曲线预缩放（与曝光系数各司其职：曝光在 tonemap 前整体乘）
 const float min_ev       = -12.47393; // AgX log2 窗口下界
 const float max_ev       = 4.026069;  // AgX log2 窗口上界
+
+// ---- RCAS（lib/common/utils/filters.glsl rcasLobe + final 锐化，春雷同款：FSR1 Robust CAS）----
+// 预处理 #if 不支持浮点比较，开关宏与数值常量分离（TAAU 同纪律）
+#define RCAS // 总开关：删本行 = final 的 RCAS 段整体编译剔除（含 depth 与 4 次邻域 fetch）、逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本宏
+#ifdef RCAS
+const float RCAS_SHARPNESS = 1.0; // 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半（春雷同值 1.0）——TAA / TAAU 时间累积软感的末级补锐；嫌锐度过强抬本值、嫌软降本值或抬 TAAU_UPSAMPLE_SHARPNESS
+#define RCAS_DENOISE // 噪声抑制（春雷同款默认开）：邻域亮度波动大处压低锐化增益、不放大噪声 / 颗粒；删本行 = 分支编译剔除、回退纯 RCAS
+const float RCAS_SURROGATE_K = 1.0; // lobe 统计的感知域代理曲线锚点（Reinhard x/(x+k)）：按 agx 灰阶三点定标（输入 0.18 / 1 / 10 → agx ≈ 0.16 / 0.55 / ~1.0，k=1 时 surrogate ≈ 0.15 / 0.50 / 0.91，中暗部贴合最紧）——代理只喂限幅 / 去噪统计（lobe 只依赖邻域单调统计量），域差仅轻微影响自适应增益；final 消费
+#endif
 
 // ---- 自动曝光（lib/post/exposure.glsl，亮度算法春雷同值）----
 const float AUTO_EXPOSURE_RATE          = 2.0;     // 适应速度（1/s）：mix 因子 1 - exp(-frameTime * RATE)，帧率无关
@@ -271,12 +316,13 @@ const float SSS_WRAP_MAX            = 2.0;  // 强度 1.0 全档的 wrap 量：n
 const float SSS_SOFT_RADIUS_MAX     = 1.0;  // 强度 1.0 全档的阴影软化半径（texel）——过大会沿墙缘漏光，进游戏按需微调
 
 // ---- 阴影（program/shadow.glsl 写入端 + lib/lighting/shadow.glsl 采样端）----
-// 引擎指令前五条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0）由 OptiFine/Iris 扫描
+// 引擎指令前六条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0 / noiseTextureResolution）由 OptiFine/Iris 扫描
 const int   shadowMapResolution      = 2048;   // 阴影贴图边长（texel）；128m 距离下每米 8 texel，中心区经扭曲再放大约 6.7 倍
 const float shadowDistance           = 128.0;  // 阴影覆盖半径（米）；采样端超出即返回 1 全亮（贴图覆盖外无阴影，lib/lighting/shadow.glsl）
 const float shadowDistanceRenderMul  = 1.0;    // 超出 shadowDistance 的几何不进阴影渲染（省填充率——超距采样本就按全亮）
 const float sunPathRotation          = -30.0;  // 太阳轨迹倾角（度，春雷同值）：正午太阳不过天顶、影子不退化；天空与光照方向自动一致
 const bool  shadowHardwareFiltering0 = true;   // 仅 shadowtex0 开硬件深度比较（sampler2DShadow）；shadowtex1 保持 sampler2D 裸深度（仅不透明几何）——彩色阴影遮挡分离与未来 PCSS blocker search 共用的后路（春v2 同布置）
+const int   noiseTextureResolution   = 256;    // 引擎程序化噪声纹理边长（texel），OptiFine 默认档；水焦散波场（lib/lighting/caustics.glsl）唯一消费者。参考：BSL 同参数族取 512（texel 密度翻倍更平滑、采样带宽翻倍），春v2 经 texture.*.noisetex 换自备 128 模糊纹理——本包不引资产、用引擎生成档
 const float SHADOW_DISTORT_FACTOR = 0.85;  // 线性扭曲强度（春v2/BSL/Kappa 同族）：中心 factor = 0.15、纹素密度放大约 6.7 倍，边缘不缩放
 const float SHADOW_DEPTH_SCALE    = 0.2;   // shadow clip z 压缩（BSL/Photon/Kappa 同值）：写读两侧对称，配合常数 bias 抑制痤疮
 const int   SHADOW_PCF_SAMPLES         = 12;   // 黄金螺旋 tap 高档（硬件比较 2×2，等效 48 次深度比较）：大盘专用——半径超 SHADOW_PCF_LOW_TIER_TEXELS 的像素（SSS 软化 / 雨天 / 远距），密度不足会噪
@@ -303,6 +349,27 @@ const float SHADOW_RADIUS_BASE    = 0.25;   // 基础软半径（texel）
 const float SHADOW_RADIUS_DIST    = 2.0;   // 随相机距离增长的半径上限（texel）
 const float SHADOW_BIAS_NORMAL    = 0.05;  // normal offset 基数（世界单位，随距离 / 坡度放大，春v2 同思路）
 const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（进游戏按痤疮 / 悬空影微调）
+
+// ---- 水焦散（program/shadow.glsl 写入 shadowcolor0 + lib/lighting/caustics.glsl 图案 + lib/lighting/shadow.glsl 彩色阴影分支消费）----
+// 春v2 computeCausticsWithDispersion 纯色移植（色散分支删）：世界坐标经 缩放 → 旋转 → 压扁 → 时间
+// 平移 后单次采样 noisetex 双通道，(1-g) × mix(r, 1, MOD) 组合、pow 提对比成焦散网——零差分 /
+// 零 fbm、1 fetch；压扁使波纹沿旋转后 x 拉长成条带状涟漪。**shadowcolor0 为 RGBA8、值域上限 1**：
+// rgb = 生物群系水色 tint × 网强度（网谷 CAUSTICS_BASE → 波前 1.0）、a 通道 = SHADOW_COLOR_WATER_A
+// 水标记（其余透射几何恒 1.0）；读取端识别标记后 ×WATER_CAUSTICS_BOOST 重建 >1 的 HDR 焦点
+//（春v2 color.a = 0.5 同款标记思路；下游 colortex6 线性域无截断）。删 WATER_CAUSTICS 宏 = 水回退
+// 原透射色路径（纹理色 tint、a = 1 无标记，读取端水分支自动失效），varying 一并编译剔除
+#define WATER_CAUSTICS
+const float CAUSTICS_SCALE = 0.015; // 缩放：世界块 → noisetex uv。texel ≈ 0.26 块 = 春v2 CAUSTICS_FREQ 0.03 × 128³ 噪声的等效密度折算到 256 noisetex；网嫌大嫌密调本值
+const mat2  CAUSTICS_ROT   = mat2(0.900447, 0.434966, -0.434966, 0.900447); // 旋转（列主序，与春v2 rotate2D(xz, -0.45) 逐位一致：其矩阵形 [[c,-s],[s,c]] 配负角净效果 = 逆时针 0.45 rad）；三角值预算、编译期折叠免运行时 sincos。**改本矩阵的转角方向会连带翻转水流轴向（与 DRIFT 符号共同决定世界系流向），与春v2 对齐时勿只改角度不改符号**
+const float CAUSTICS_SQUASH = 4.0; // 压扁：噪声 y 向频率 ×4 → 波纹沿旋转后 x 拉长成条带状涟漪（春v2 z×4 同值）；条带拉长比主旋钮
+const vec2  CAUSTICS_DRIFT = vec2(0.0, 0.065); // 时间平移速度（uv/秒，沿旋转系压扁轴；caustics.glsl 侧 -= 与春v2 `sampleUV -=` 同号——图案沿压扁轴正向滚动）：速度值 = 春v2 CAUSTICS_SPEED 0.13（噪声域）的世界速度 4.3 块/秒折算到本 uv 域
+const float CAUSTICS_MOD   = 0.8;  // 次级通道调制权重：web = (1-n.g) × mix(n.r, 1, 本值)（春v2 同值）；嫌网碎抬 → 次级调制更弱、图案更由主通道独挑
+const float CAUSTICS_POWER = 3.0;  // pow 收网对比度（春v2 同值）：网稀嫌淡降、嫌网满抬
+const float CAUSTICS_TILT  = 0.2;  // 采样平面 y 斜置系数（BSL 同值）：xz − y·TILT——流动水面不同高度错开图案平面，跌水 / 阶梯水免竖直条纹
+const float CAUSTICS_BASE  = 0.22; // 存储背景（网谷）：读取端 ×BOOST 后 ≈ 0.6×tint
+const float SHADOW_COLOR_WATER_A    = 0.5;  // shadowcolor0.a 水标记值（RGBA8 量化 128/255；非水几何恒写 1.0）
+const float SHADOW_COLOR_WATER_TEST = 0.75; // 读取端水标记判定阈（texelFetch 精确纹素，0.5 与 1.0 的中点）
+const float WATER_CAUSTICS_BOOST    = 2.8;  // 读取端 HDR 重建系数：vis = 存储 rgb × 本值——网谷 ≈ 0.6×tint、波前 ≈ 2.8×tint（直射光水下焦点亮度；春v2 BRI_MIN/MAX 1.0→4.0 档两端折算，低配定位取收敛值）。实机 PCF 盘平均 + TAA 时间累积会再抹平一档
 
 // ---- 屏幕空间追踪阴影（lib/lighting/shadow.glsl screenSpaceShadowVisibility + lighting.glsl 接入，方案见 plans/屏幕空间追踪阴影方案.md）----
 // 沿主光源方向对 depthtex1 世界空间 ray march，一档追踪兼两职：近景补接触细节（normal offset /

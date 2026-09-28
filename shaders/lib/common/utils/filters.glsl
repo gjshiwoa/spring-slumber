@@ -1,4 +1,5 @@
-// 通用采样 / 滤波工具库：无依赖（函数全部显式传参，不引用 uniforms / 常量），
+// 通用采样 / 滤波工具库：函数全部显式传参、不引用 uniforms（唯一常量例外：rcasLobe 的去噪
+// 分支由 constants.glsl 的 RCAS_DENOISE 宏门控，接入方须在 constants 之后 include 方可启用），
 // 由 program 按需平铺 include（lib 之间不互相 include 的约定不变）
 #ifndef LIB_SAMPLING_GLSL
 #define LIB_SAMPLING_GLSL
@@ -94,6 +95,51 @@ vec4 catmullRom5(sampler2D src, vec2 uv, vec2 texSize, float sharpenAmount) {
     weightSum += w12.x * w3.y;
 
     return result / weightSum;
+}
+
+// RCAS 锐化增益（AMD FidelityFX FSR1 Robust Contrast Adaptive Sharpening，移植自春雷
+// filters.glsl 的 RcasFilter——FSR3 SDK fsr1 头版本、含 lowerLimiterMultiplier 稳健限幅：
+// https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/main/Kits/FidelityFX/upscalers/fsr3/include/gpu/fsr1/ffx_fsr1.h）
+// 本函数只返回自适应增益 lobe（春雷原式与输出组合的拆分：lobe 是线性组合系数，统计域与组合域
+// 由此解耦——调用方可「感知域取增益、自身工作域做组合 + 单次 tonemap」，省去邻域逐 tap 过
+// tonemap 的成本），输出组合 = (lobe·(b+d+f+h) + e) / (4·lobe + 1)，由调用方施加
+// b / d / e / f / h = 十字邻域（上 / 左 / 中 / 右 / 下，FSR1 记法），须为单调压到 [0,1] 的
+// 感知域值——限幅公式按该域设计（hitMax 以 1 为白点），HDR 线性直入时 >1 通道限幅失效、
+// 亮区静默不锐化；sharpnessStops：0.0 最锐、每 +1.0 增益减半（exp2 衰减，强度常量
+// RCAS_SHARPNESS 在 constants.glsl）
+// RCAS_DENOISE（constants.glsl 可选宏、本文件唯一常量依赖）：邻域亮度波动大处压低增益，
+// 不放大噪声 / 颗粒（春雷同款默认开）；未定义时分支编译剔除、回退纯 RCAS
+float rcasLobe(vec3 b, vec3 d, vec3 e, vec3 f, vec3 h, float sharpnessStops) {
+    const float rcasLimit = 0.25 - 1.0 / 16.0;
+    float sharpness = exp2(-sharpnessStops);
+
+    float bL = b.b * 0.5 + (b.r * 0.5 + b.g);
+    float dL = d.b * 0.5 + (d.r * 0.5 + d.g);
+    float eL = e.b * 0.5 + (e.r * 0.5 + e.g);
+    float fL = f.b * 0.5 + (f.r * 0.5 + f.g);
+    float hL = h.b * 0.5 + (h.r * 0.5 + h.g);
+
+#ifdef RCAS_DENOISE
+    float nz = 0.25 * (bL + dL + fL + hL) - eL;
+    nz = clamp(abs(nz) / max(max(max(bL, dL), max(eL, fL)) - min(min(min(bL, dL), min(eL, fL)), hL), 1e-6), 0.0, 1.0);
+    nz = -0.5 * nz + 1.0;
+#endif
+
+    vec3 mn4 = min(min(b, d), min(f, h));
+    vec3 mx4 = max(max(b, d), max(f, h));
+
+    float lowerLimiterMultiplier = clamp(eL / max(min(min(min(bL, dL), fL), hL), 1e-6), 0.0, 1.0);
+    vec3 hitMin = mn4 / max(4.0 * mx4, vec3(1e-6)) * lowerLimiterMultiplier;
+    vec3 hitMax = (vec3(1.0) - mx4) / min(4.0 * mn4 - vec3(4.0), vec3(-1e-6));
+
+    vec3 lobeRgb = max(-hitMin, hitMax);
+    float lobe = max(-rcasLimit, min(max(max(lobeRgb.r, lobeRgb.g), lobeRgb.b), 0.0)) * sharpness;
+
+#ifdef RCAS_DENOISE
+    lobe *= nz;
+#endif
+
+    return lobe;
 }
 
 #endif

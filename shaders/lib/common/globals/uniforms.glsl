@@ -3,6 +3,7 @@
 #define LIB_UNIFORMS_GLSL
 
 uniform sampler2D tex; // 采样纹理统一命名 tex
+uniform sampler2D noisetex; // 引擎程序化噪声纹理（边长 = constants.glsl 的 noiseTextureResolution，线性滤波、REPEAT 寻址）：水焦散波场（lib/lighting/caustics.glsl）
 
 uniform sampler2D normals;  // 法线贴图（labPBR 约定，rgb 存切线空间法线，读取端 *2-1 后经 TBN 变换，不翻 Y）
 uniform sampler2D specular; // 高光贴图（labPBR 约定，r = smoothness，g = F0，b = porosity/SSS，a = emissive）
@@ -43,6 +44,7 @@ uniform mat4 gbufferPreviousModelView;  // 视图 -> 世界（上帧）：TAA �
 uniform mat4 gbufferPreviousProjection; // 世界 -> 裁剪（上帧）：TAA 重投影
 
 // 以下为天空 / 光照效果库所需：天空（lib/atmosphere/）与光照（lib/lighting/）均已接入 deferred_init
+uniform mat4 gbufferModelView;       // 世界空间 -> 视图空间（3x3 部分把世界方向转观察方向：植物晃动偏移 gbuffers 侧转观察系，lib/common/pipeline/waving.glsl）
 uniform mat4 gbufferModelViewInverse; // 视图空间 -> 世界空间（viewToWorldDirection / viewToRelativeWorld 共用）
 
 uniform vec3 sunPosition;         // 太阳方向（视图空间，长度为到太阳的距离）
@@ -56,6 +58,7 @@ uniform int isEyeInWater;   // 0 = 大气中 / 1 = 水中 / 2 = 熔岩中（水�
 // ---- 阴影贴图（program/shadow.glsl 写入 + lib/lighting/shadow.glsl 采样）----
 uniform mat4 shadowModelView; // 相对世界（当帧相机为原点、与 gbufferModelView 同源空间）-> shadow 视图
 uniform mat4 shadowProjection; // shadow 视图 -> shadow 裁剪（正交）
+uniform mat4 shadowModelViewInverse; // shadow 视图 -> 相对世界：shadow vsh 水面 / 植物晃动的绝对世界坐标重建（焦散图案世界锚定，BSL / 春v2 同款逆链）
 // shadowtex0 开硬件比较（constants.glsl 的 shadowHardwareFiltering0）、声明为 sampler2DShadow：
 // 比较采样即深度比较 + 2×2 双线性插值，一次采样顶手动 4 次比较（GLSL 330 的 textureLod
 // 重载同样走硬件比较滤波，采样端显式 LOD 0 免隐式导数）
@@ -63,6 +66,6 @@ uniform sampler2DShadow shadowtex0; // 全几何深度（含半透明）：基�
 // shadowtex1 不开硬件比较、保持 sampler2D 裸读（仅不透明几何）——彩色阴影遮挡分离与
 // 未来 PCSS blocker search 共用的后路（春v2 同布置）
 uniform sampler2D shadowtex1;   // 仅不透明深度（裸值）
-uniform sampler2D shadowcolor0; // shadow pass 透射色（sRGB albedo，program/shadow.glsl 写入）
+uniform sampler2D shadowcolor0; // shadow pass 透射色（sRGB albedo，program/shadow.glsl 写入）；RGBA8：水面像素写 焦散×tint（rgb ≤1）+ a 通道水标记（SHADOW_COLOR_WATER_A，读取端 ×WATER_CAUSTICS_BOOST 重建 HDR）
 
 #endif

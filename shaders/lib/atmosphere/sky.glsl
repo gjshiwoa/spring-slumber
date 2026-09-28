@@ -104,13 +104,10 @@ vec3 fallbackSkyColor(vec3 dirWorld, vec3 sunDirWorld) {
     return ambientRadiance * (0.45 * SKY_BRIGHTNESS * hemisphere);
 }
 
-// 天空色采样入口（deferred_init 天空分支 / 未来反射经此走 LUT）
-// dirView 视图空间方向（不要求归一化）；光源方向 / horizon / lutValid 均由调用方从 vsh 帧数据
-// 传入；返回线性 HDR，SKY_BRIGHTNESS 已在生成端乘入。日 / 月两半区和式（春雷同构），非活动半区
-//（光源低于 SKY_LIGHT_MIN_HEIGHT、生成端整区写 0）以同一常量门控跳过参数化与 fetch——不变式
-//「采样端跳过 ⊆ 生成端写黑」由两侧共用常量保证；LUT 内容滞后一帧（composite12 在 deferred 后执行）
-vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon, bool lutValid) {
-    vec3 dirWorld = normalize(viewToWorldDirection(dirView));
+// 天空色采样：世界系核心（dirWorld 须已归一化）——已持世界系归一方向的调用方（fog.glsl 的
+// boundaryFogColor）直入本函数，免「世界→视图→世界」mat3 往返与重复 normalize（2026-09 拆出）；
+// 机制注释见下方 getSkyColor 包装（两入口同一实现 = 采样链单真源）
+vec3 getSkyColorWorld(vec3 dirWorld, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon, bool lutValid) {
     float zenithParam = skyViewLutZenithParam(dirWorld, horizon);
 
     vec3 color = vec3(0.0);
@@ -121,6 +118,17 @@ vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon
         color += sampleSkyViewLutHalf(skyViewLutMoonRect(),
                                       vec2(skyViewLutAzimuthParam(dirWorld, moonDirWorld), zenithParam));
     return lutValid ? color : fallbackSkyColor(dirWorld, sunDirWorld);
+}
+
+// 天空色采样入口（deferred_init 天空分支 / 未来反射经此走 LUT）：视图系方向的归一化薄壳，
+// 转世界系后委托 getSkyColorWorld
+// dirView 视图空间方向（不要求归一化）；光源方向 / horizon / lutValid 均由调用方从 vsh 帧数据
+// 传入；返回线性 HDR，SKY_BRIGHTNESS 已在生成端乘入。日 / 月两半区和式（春雷同构），非活动半区
+//（光源低于 SKY_LIGHT_MIN_HEIGHT、生成端整区写 0）以同一常量门控跳过参数化与 fetch——不变式
+//「采样端跳过 ⊆ 生成端写黑」由两侧共用常量保证；LUT 内容滞后一帧（composite12 在 deferred 后执行）
+vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon, bool lutValid) {
+    return getSkyColorWorld(normalize(viewToWorldDirection(dirView)),
+                            sunDirWorld, moonDirWorld, horizon, lutValid);
 }
 
 // 太阳盘（线性 HDR，deferred_init 天空分支在 getSkyColor 之后、云合成之前解析叠加——LUT 纹素

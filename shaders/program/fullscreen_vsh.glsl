@@ -1,4 +1,5 @@
-// 通用全屏 vsh——deferred_init / composite_taa / final 共用的顶点着色器（参考春v2 全屏 vsh 的
+// 通用全屏 vsh——deferred_init / composite_fog / composite_taa / final 共用的顶点着色器（参考春v2
+// 全屏 vsh 的
 // 帧数据 varying 族）：凡「逐帧恒定、全屏一致」的量在 main 内一次算好、经 out varying 传入 fsh
 //（全屏 quad 仅 3~4 顶点、透视矫正插值精确）。接入方式：program 平铺 include（内容 STAGE_VERTEX
 // 自守卫、fsh 编译展开为空）；fsh 按需声明同名 in（未声明的由链接器剔除、零成本）；带自定义 vsh
@@ -55,9 +56,10 @@ void main() {
     gl_Position = ftransform();
     vTexCoord = gl_MultiTexCoord0.xy;
 #if defined(FULLSCREEN_RENDER_REGION) && defined(TAAU)
-    // TAAU：本 pass（deferred_init）的 quad 缩进与 gbuffers 相同的左下子区域；vTexCoord 同步缩为
-    // 子区域物理 uv（fsh 走 texelFetch(gl_FragCoord) 不消费 vTexCoord，缩放仅保持语义一致）。
-    // 宏由 world0/deferred 入口定义；composite_taa / final 不定义、quad 全屏
+    // TAAU：本 pass（deferred_init / composite_fog 边界雾）的 quad 缩进与 gbuffers 相同的左下子区域；
+    // vTexCoord 同步缩为子区域物理 uv（fsh 走 texelFetch(gl_FragCoord) 不消费 vTexCoord，缩放仅保持
+    // 语义一致）。宏由 world0/deferred1 与 world0/composite2 入口定义；composite_taa / final 不定义、
+    // quad 全屏
     gl_Position.xy = gl_Position.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * gl_Position.w;
     vTexCoord *= RENDER_SCALE;
 #endif

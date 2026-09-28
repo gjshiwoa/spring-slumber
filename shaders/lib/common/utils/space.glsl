@@ -23,6 +23,22 @@ vec3 screenToView(vec3 screenPos) {
     return viewPos.xyz / viewPos.w;
 }
 
+// screenToView 的典则透视闭式（shadow.glsl 屏幕空间追踪的步内场化同款公式，与 screenToView
+// 代数恒等——tools/sim_canonical_viewpos_verify.py 数值验证机器精度级）：gbufferProjection 恒为
+// 典则对称透视矩阵（OptiFine / Iris 注入，clip.w = -view.z）——viewZ = -projD/(ndcZ + projC)
+// 一次除、view.xy = ndc.xy·projXY·(-viewZ)，免每像素 mat4 乘 + 3 div；矩阵结构若变则回退
+// screenToView。逐像素全屏重建的热路径（composite_fog 边界雾）消费；入参 uv / depth 语义与
+// screenToView(vec3(uv, depth)) 完全一致（z = 1 落远平面、未归一化方向的调用方照用）
+vec3 screenToViewCanonical(vec2 uv, float depth) {
+    float projC = gbufferProjection[2].z;
+    float projD = gbufferProjection[3].z;
+    vec2 projXY = 1.0 / vec2(gbufferProjection[0].x, gbufferProjection[1].y);
+
+    vec2 ndc = uv * 2.0 - 1.0;
+    float viewZ = -projD / (depth * 2.0 - 1.0 + projC);
+    return vec3(ndc * projXY * (-viewZ), viewZ);
+}
+
 // 观察空间方向 -> 世界空间方向（纯旋转、不要求归一化，长度保持）
 // 天空色（sky.glsl）与光照方向换算（lighting.glsl）共用
 vec3 viewToWorldDirection(vec3 dirView) {
