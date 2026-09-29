@@ -184,8 +184,9 @@ vec3 skyRadianceAnalytic(float observerRadius, vec3 dirWorld, vec3 lightWorld,
 #else
     t = planetHitDistance(observerRadius, rayDir.y);
 #endif
+    vec3 transmittance; // 视线路径透射率 out 占位（天空色只消费散射项）
     return atmosphericRadiance(origin, rayDir, dirWorld, lightWorld, lightOpticalDepth, t, irradiance,
-                               ambientField)
+                               ambientField, transmittance)
          * SKY_BRIGHTNESS;
 }
 

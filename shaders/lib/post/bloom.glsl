@@ -43,7 +43,7 @@ vec2 bloomTileRectMax() {
     return rectMax;
 }
 
-// colortex7 需要跨帧保值的完整预留区域：天空盒 + sky-view LUT + 曝光 gutter。
+// colortex7 需要跨帧保值的完整预留区域：天空盒 + sky-view LUT + 曝光 gutter（+ aerial LUT）。
 // composite12 的 outMisc 必须覆盖此范围，不能只覆盖 Bloom 图集包围盒。
 vec2 bloomMiscRectMax() {
     vec2 miscSize = vec2(textureSize(colortex7, 0));
@@ -52,7 +52,13 @@ vec2 bloomMiscRectMax() {
         float(SKYVIEW_LUT_ORIGIN_X + SKYVIEW_LUT_W),
         float(2 * SKYVIEW_LUT_H)
     ) / miscSize;
-    return max(skyboxMax, skyViewMax);
+    vec2 rectMax = max(skyboxMax, skyViewMax);
+#ifdef AERIAL_PERSPECTIVE
+    // aerial LUT（原点 (0,0)，见 lib/atmosphere/aerial.glsl）——当前数值上已被天空盒预留区
+    // (256,256) 包含，并入是为结构性保证：天空盒槽位未来启用 / 改址时 aerial 区域仍在光栅覆盖内
+    rectMax = max(rectMax, vec2(float(AERIAL_LUT_W), float(AERIAL_LUT_H * AERIAL_LUT_SLICES)) / miscSize);
+#endif
+    return rectMax;
 }
 
 #ifdef CLOUDS_2D

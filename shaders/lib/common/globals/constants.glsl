@@ -152,6 +152,36 @@ const float BOUNDARY_FOG_END    = 0.90; // 雾满强距离（×far）：0.9·far
 const float BOUNDARY_FOG_ZENITH = 0.40; // 天顶淡出上沿（视线世界 y = sin 仰角，初值 0.5）：0（地平线）满雾 → 0.4（仰角约 23.6°）零雾——雾带只贴地平线、抬头即散（2026-09 按反馈下调）
 #endif
 
+// ---- 大气散射雾 / 空气透视（lib/atmosphere/aerial.glsl；生成端挂 composite12 天空 LUT 重算 pass、
+//      消费端在 composite_fog（composite2）边界雾之前；设计全文见 plans/地表大气散射方案.md）----
+// 「表面 × 路径透射率 + 路径内散射」的物理式空气透视（aerial perspective）：
+//   finalColor = surface × T(viewDir, dist) + S(viewDir, dist)——S/T 由 Chapman 解析核心
+//   （atmosphere.glsl 的 atmosphericRadiance 原生支持有限路径长度 t，透射率经 out 参数带回）按
+//   「方向 × 距离档」小 LUT 供给，零新 pass / 缓冲 / 纹理资产。三条不变式：
+//   ①放大距离、不放大密度（inscatter(∞) 渐近 = 天空色，密度域调制会造「浓版天空」≠ 屏幕 sky-view
+//     LUT 值、地平线处地形与天空色差缝）——SCALE 是纯距离域旋钮、雨天加浓同样走距离域乘子；
+//   ②∞ 档存 t = SKY_NO_HIT 的求值 = 同参数天空 LUT 值（地平线以上方向结构性融接）；
+//   ③天空像素不施加（depth >= 1 跳过，渐近一致性只在几何侧成立）。与边界雾两段式分工：aerial 管
+//   中近距物理空气感（方向性 / 色彩 / 曙暮光分层），boundary 兜 0.7~0.9·far 渲染边界硬融接。
+//   MC 视距内真实大气几乎不可见（水平 500 m 路径 Rayleigh τ ≈ 0.006 → inscatter ~0.6% 天空亮度），
+//   观感强度靠等效距离放大。近场起始门（AERIAL_FOG_START / END，2026-09 按反馈接入）：约 far/3
+//   内无雾、效果域 smoothstep 自零渐入至 0.7·far（= BOUNDARY_FOG_START 接力锚）全强——近场空气感
+//   弃用、远端强度不受影响。开关宏与数值常量分离（TAAU 同纪律）
+#define AERIAL_PERSPECTIVE
+#ifdef AERIAL_PERSPECTIVE
+// LUT 布局（texel 域）：colortex7 左下角原点 (0,0)、区域 W×(H×SLICES) 纵向堆叠 = 天空盒预留区
+//（SKYBOX_LUT_SIZE 256 见方）的左下角、至今空置；与曝光 (258,0) / 标记 (259,0) / sky-view
+//（x ∈ [260,460)）均不重叠——天空盒槽位未来启用时须先给 aerial 改址
+const int   AERIAL_LUT_W      = 64;  // 方位分辨率（texel）：aerial 是低频量、被距离维插值与 TAA 时间累积双重平滑，低于 sky-view 的 200；Mie 前向峰在 sqrt 参数化下光源侧 ~13 texel、bilinear + TAA 足够
+const int   AERIAL_LUT_H      = 48;  // 天顶分辨率（texel）：方向参数化与 sky-view 互逆组共用（双段 sqrt 向地平线集中），分辨率独立
+const int   AERIAL_LUT_SLICES = 4;   // 距离档数（y 向堆叠）：前 3 档有限等效距离 + 末档 ∞（天空渐近，不变式②）
+const float AERIAL_DIST_SLICES[3] = float[3](1024.0, 4096.0, 16384.0); // 距离档位（等效米）：插值按线性距离权重（inscatter 未饱和段近似线性于 t，log 域 lerp 档间中点有 ~25% 系统性偏差）；**档 0 以下不设起始阈值、向相机线性归零**（短路径 inscatter ∝ t 的线性外推——整段早退跳过会在起始距离环留世界系固定的亮度阶，2026-09 实测可见后移除）；末段向 ∞ 档按 1 − S2/t 收尾（无穷远作线性端点 w 恒 0、直接跳档是档 2 距离环上的不连续）。SCALE = 64/9 下档位映射真距 144 / 576 / 2304 格（far 内到不了档 2、晴天不触末段）
+const float AERIAL_DIST_SCALE = 64.0 / 9.0; // 观感强度主旋钮：等效距离放大倍数（真距 × 本值 = LUT 距离域）——中短距 inscatter ∝ t、缩放即强度（2026-09 两轮反馈自 64 连降至 1/9：64 时 far 端 ~70%+ 过浓、64/3 仍偏浓；1/9 后 144 格 ~2% / 576 格 ~8% / far ~9%，远景边界由边界雾主导）。要中距离就明显可回抬（每 ×2 强度约翻倍）。改它不动档位表（档位是 LUT 的骨头、SCALE 只决定多远落哪档）
+const float AERIAL_RAIN_BOOST = 2.0;  // 雨天加浓：距离域乘子 (1 + 本值 × rainStrength)——保渐近不变式①（密度域调制禁用）
+const float AERIAL_FOG_START  = 1.0 / 3.0; // 起始距离（×far，2026-09 按反馈接入）：约 far/3 内无雾——applyAerialPerspective 的**效果域** smoothstep 门（LUT 路径仍无阈值、档 0 以下线性归零见上条），fade 乘在「原表面 vs 雾化结果」的 mix 上；起点系数恒 0 且零斜率（C1）、环内外值同为 0，与首代「早退 = 0 / 环外立刻满档 LUT[S0]」的值阶环不同构，起始距离环结构性不可见；门内像素恒等早退、零 fetch
+const float AERIAL_FOG_END    = 0.70;      // 渐满距离（×far）：此处起 aerial 全强（远端强度与门前逐位相同——SCALE 两轮反馈的调定不受门影响）；与 BOUNDARY_FOG_START 同值的接力锚（aerial 渐满即 boundary 开始融接），独立常量、改动须成对评估
+#endif
+
 // ---- 信标光柱（gbuffers_beacon，春雷同值）----
 const float ALPHA_BEACON_CORE    = 254.1 / 255.0; // 不透明核心判定阈值（a >= 此值整像素写 gbuffer）
 const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写入 specular.a，labPBR emissive）

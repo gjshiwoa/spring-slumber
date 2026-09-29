@@ -9,6 +9,9 @@
 // 不得干涉 outColor（否则 tile0 凿洞、final 放大后成屏幕黑矩形）：
 //   - 天空 view LUT：日 / 月半区各 200×100 逐纹素重算（帧常量在 vsh 预计算经 varying 传入，
 //     低于 SKY_LIGHT_MIN_HEIGHT 的非活动光源整半区写 0）
+//   - aerial 透视 LUT（AERIAL_PERSPECTIVE）：左下角原点 64×192（方向 64×48 × 距离 4 档纵向
+//     堆叠）逐纹素重算（lib/atmosphere/aerial.glsl 的 aerialLutTexel；帧常量复用天空 LUT 的
+//     vsh varying、vsh 零新增；宏关时该区域落入「其余透传」分支保值无害）→ composite_fog 消费
 //   - 曝光槽位：tile4 对数平均测光 + 指数平滑写回
 //   - 其余像素：包围盒内同位置读回透传（clear=false 跨帧保值），区域外光栅带写 0 免回读
 // DRAWBUFFERS 随输出不同下放入口文件（composite9~11 = 1、composite12 = 17），program 不携带
@@ -25,6 +28,7 @@
 #include "/lib/post/exposure.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
 #include "/lib/atmosphere/sky.glsl"
+#include "/lib/atmosphere/aerial.glsl"
 
 VARYING vec2 vTexCoord;
 #if BLOOM_LEVEL == 0
@@ -95,7 +99,18 @@ void main() {
                                        lightDirection, lightOpticalDepth, irradiance, ambientField);
         }
         outMisc = vec4(skyColor, SKYVIEW_LUT_VALID_MARKER);
-    } else if (pixel == exposureTexel()) {
+    }
+#ifdef AERIAL_PERSPECTIVE
+    else if (pixel.x < AERIAL_LUT_W && pixel.y < AERIAL_LUT_H * AERIAL_LUT_SLICES) {
+        // aerial 透视 LUT（左下角原点，与既有槽位 / sky-view 区域结构性互斥）：双光源和式
+        //（主导门控后多数时间单光源，≈ 天空 LUT 成本的一成半~三成）；alpha = 路径透射率
+        //（有效性标记由 sky LUT 半区 alpha 承担、本区域不写标记）
+        outMisc = aerialLutTexel(pixel, vSkyObserverRadius, vSkyHorizon,
+                                 vSkySunDirection, vSkySunOpticalDepth, vSkySunAmbientField,
+                                 vSkyMoonDirection, vSkyMoonOpticalDepth, vSkyMoonAmbientField);
+    }
+#endif
+    else if (pixel == exposureTexel()) {
         // 自动曝光寄生存储：仅槽位 1 texel 付测光成本
         outMisc = vec4(adaptedExposure(targetExposure(sceneAverageLuminance())), 0.0, 0.0, 1.0);
     } else if (pixel == PASS_ORDER_MARKER_TEXEL) {

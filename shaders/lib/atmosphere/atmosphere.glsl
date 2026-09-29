@@ -167,11 +167,15 @@ vec3 ambientCapture(vec3 rayleighView, vec3 mieView, vec3 tauV) {
 // 散射路径（airMass / tauSp 端点几何，地平线钳制时传钳后方向）、phaseDirection 只进相函数 mu（传
 // 未钳制的原始方向，保地平线以下的角向明暗）；不钳制的调用方两参传同一方向即逐位等价
 // origin 相机地心系位置、direction 视线方向（世界系，须归一化）、lightDirection 光源方向（同系归一化，太阳 / 月亮通用）、
-// t 视线行星命中距离（SKY_NO_HIT = 朝天）、lightOpticalDepth 为起点沿光源方向到大气顶的消光
-//（LUT 生成端在 vsh 中预计算）、irradiance 大气顶光源辐照度（SOLAR_IRRADIANCE / MOON_IRRADIANCE）
+// t 视线路径长度（SKY_NO_HIT = 到大气顶无穷远；天空 LUT 传行星命中距离、aerial LUT 传有限等效
+// 距离——含 tauSp 端点几何的有限路径积分原生支持）、lightOpticalDepth 为起点沿光源方向到大气顶的
+// 消光（LUT 生成端在 vsh 中预计算）、irradiance 大气顶光源辐照度（SOLAR_IRRADIANCE / MOON_IRRADIANCE）
+// out viewCapture = 本视线的各向同性散射截获比（atmosphericRadiance 的 MS 项与 skyAmbientField 的
+// 截获比 ρ 统计共用一份 airMass，免二次求值）；out viewTransmittance = exp(−tauV) 视线路径透射率
+//（aerial LUT 的表面衰减项；tauV 只依赖 origin/direction/t、与光源无关，多光源调用返回同值）
 vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 phaseDirection, vec3 lightDirection,
                                vec3 lightOpticalDepth, float t, vec3 irradiance,
-                               out vec3 viewCapture) {
+                               out vec3 viewCapture, out vec3 viewTransmittance) {
     vec3  zenith = normalize(origin);
     float r   = length(origin);
     float z   = dot(direction, zenith);
@@ -189,10 +193,15 @@ vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 phaseDirection,
     vec3 tauS = lightOpticalDepth;
 
     // 视线终点沿太阳方向到大气顶的消光，天空射线（未命中）取 0；zSp 端点几何跟射线方向
-    //（muRay 而非相位 mu——dot(lightDir, P̂) 的几何关系属于路径，不属于角分布）
+    //（muRay 而非相位 mu——dot(lightDir, P̂) 的几何关系属于路径，不属于角分布）。
+    // rP 钳贴地：aerial LUT 的等效路径是「沿视线方向走 t_eff 米」（放大语义），下视远距时虚拟
+    // 终点半径会低于 EARTH_RADIUS（虚拟钻地）——钳到地表使 tauSp 取贴地端点（下视远处的端点
+    // 消光，日落俯视时「山下雾暗、山上雾亮」分层的来源）；天空 LUT 的行星命中路径终点本就在
+    // 地表附近、本钳制为无操作
     vec3 tauSp = vec3(0.0);
     if (t < 1e29) {
         float rP  = sqrt(t * t + 2.0 * z * r * t + r * r);
+        rP = max(rP, EARTH_RADIUS);
         float zSp = (zS * r + muRay * t) / rP;
         tauSp = opticalDepthToSpace(rP, zSp);
     }
@@ -204,6 +213,7 @@ vec3 atmosphericRadianceSingle(vec3 origin, vec3 direction, vec3 phaseDirection,
     scatter.b = energyIntegralRatio(tauS.b, tauSp.b + tauV.b);
 
     viewCapture = ambientCapture(rayleighView, mieView, tauV);
+    viewTransmittance = exp(-tauV);
     return irradiance * (rayleighView * rayleighPhase(mu) + mieView * miePhase(mu)) * scatter;
 }
 
@@ -234,9 +244,10 @@ vec3 skyAmbientField(float observerRadius, vec3 lightWorld,
                      + (axisU * cos(phi) + axisV * sin(phi)) * sinTheta;
             float t = planetHitDistance(observerRadius, dir.y);
             vec3 capture;
+            vec3 captureTrans; // 透射率 out 占位（环境场只消费 capture）
             // 求积方向两参同值（环境场是球面平均的物理量，不钳制——地平线下的暗贡献本就应计入）
             fieldSum += atmosphericRadianceSingle(origin, dir, dir, lightWorld, lightOpticalDepth,
-                                                  t, irradiance, capture);
+                                                  t, irradiance, capture, captureTrans);
             captureSum += capture;
         }
     }
@@ -248,13 +259,14 @@ vec3 skyAmbientField(float observerRadius, vec3 lightWorld,
 // 单次 + 多次散射天光（线性 HDR，未乘 SKY_BRIGHTNESS）：单次散射 + 各向同性环境场沿视线
 // 的再散射（ambientCapture × ambientField × SKY_MS_STRENGTH，强度 0 = 退回纯单次散射）；
 // ambientField = skyAmbientField 的预计算值（vsh 每帧每光源一次、经 varying 传入），
-// direction / phaseDirection 的分离语义与 atmosphericRadianceSingle 一致（钳制路径 + 未钳制相位）
+// direction / phaseDirection 的分离语义与 atmosphericRadianceSingle 一致（钳制路径 + 未钳制相位）；
+// out viewTransmittance = 视线路径透射率（aerial LUT 消费，透传自 atmosphericRadianceSingle）
 vec3 atmosphericRadiance(vec3 origin, vec3 direction, vec3 phaseDirection, vec3 lightDirection,
                          vec3 lightOpticalDepth, float t, vec3 irradiance,
-                         vec3 ambientField) {
+                         vec3 ambientField, out vec3 viewTransmittance) {
     vec3 viewCapture;
     vec3 single = atmosphericRadianceSingle(origin, direction, phaseDirection, lightDirection,
-                                            lightOpticalDepth, t, irradiance, viewCapture);
+                                            lightOpticalDepth, t, irradiance, viewCapture, viewTransmittance);
     return single + viewCapture * ambientField * SKY_MS_STRENGTH;
 }
 
