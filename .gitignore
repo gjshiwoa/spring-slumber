@@ -1,1 +1,6 @@
-.zcode/
+# 白名单模式：默认忽略根目录下所有条目，仅放行下列内容
+/*
+!/shaders/
+!/LICENSE
+!/README.md
+!/.gitignore
