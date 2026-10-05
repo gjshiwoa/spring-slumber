@@ -2,12 +2,18 @@
 // 与 gbuffers_opaque 的区别: 叠加 entityColor（受伤红闪等实体着色）后再写入 gbuffer
 // 按 pass 顺序标记自适应（lib/common/pipeline/pass_order_marker.glsl，vsh 判定经 flat varying 下传）：
 //   deferred 之前（引擎常规位）：MRT 写 colortex4/5（布局同 gbuffers_opaque 头部注释），colortex6
-//     随写 0（deferred_init 全屏覆盖）——原有行为
-//   deferred 之后（引擎变体防御位）：光照图轻量着色（forwardLightmapShade，与简单半透明同式）
-//     手动 alpha 合成进线性主颜色 colortex6（本阶段引擎混合本就 off；主颜色在 colortex6 =
-//     gbuffers 可采样的 gaux3，背景 fetch + mix 后写回同缓冲）；colortex4/5 本分支不写——
-//     gbuffer 读者（deferred_init 几何分支）只读 depthtex1 < 1 像素、该区域每帧被不透明
-//     gbuffers 先行整写，遗留内容活不到读者面前
+//     随写 0（colortex6 的 per-buffer 混合下 alpha 0 = 精确 no-op；deferred_init 全屏覆盖）——
+//     原有行为；colortex4/5 打包整像素写入由程序级 blend off 保护
+//   deferred 之后（引擎变体防御位，Iris 拆分实体绘制等的半透明实体由此走）：简单光照
+//     （forwardEntityShade，lib/lighting/ambient.glsl——直射 + 天光 + 方块光：直射项对齐
+//     shadeSurface 的公式与帧数据，阴影取 shadowtex1 单 tap 最简硬判定〔水面直射门控同款〕；
+//     与「之前」路径的延迟光照实体同屏时日落红化 / 量级一致）后输出直通 (lit, alpha)、
+//     colortex6 经 **per-buffer 硬件 alpha 混合**原子合成
+//     （shaders.properties `blend.gbuffers_entities.colortex6 = SRC_ALPHA ONE_MINUS_SRC_ALPHA
+//     ZERO ONE`〔春v2 逐缓冲格式〕；曾为「gaux3 fetch 背景 + mix 写回」手动 mix——读正在写的
+//     附件在个别驱动未定义 + 同 draw 重叠竞态，2026-10 兼容性标准化移除，与 textured 族
+//     after 路径同款）；colortex4/5 本分支不写——gbuffer 读者（deferred_init 几何分支）只读
+//     depthtex1 < 1 像素、该区域每帧被不透明 gbuffers 先行整写，遗留内容活不到读者面前
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"
@@ -15,6 +21,7 @@
 #include "/lib/common/utils/color.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/space.glsl"
+#include "/lib/atmosphere/atmosphere.glsl"
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/pipeline/pass_order_marker.glsl"
@@ -27,6 +34,9 @@ VARYING vec4 vColor;
 VARYING vec2 vLmcoord;
 VARYING vec3 vViewPos;
 VARYING vec3 vSkyAmbient; // 天空环境辐照度基色（vsh 探针一次取好；同通用全屏 vsh 的同名 varying 语义）
+VARYING vec3 vLightDirection;   // 帧数据（与通用全屏 vsh 同名同语义）：「之后」路径直射项的光向 / 辐照度 /
+VARYING vec3 vDirectIrradiance; // 透射率——vsh 一次算好，fsh 经同名 varying 消费（带自定义 vsh 的
+VARYING vec3 vDirectTransmittance; // pass 帧数据纪律，gbuffers_translucent 同款）
 flat VARYING float vAfterDeferred; // pass 顺序判定 0/1（flat float——bool varying 不为补丁器 / 部分驱动所容）
 
 // ================================ FRAGMENT ================================
@@ -36,7 +46,7 @@ flat VARYING float vAfterDeferred; // pass 顺序判定 0/1（flat float——bo
 
 layout(location = 0) out vec4 outMaterial; // colortex4：「之前」= 打包几何 /「之后」= 不写（无读者）
 layout(location = 1) out vec4 outDetail;   // colortex5：同上
-layout(location = 2) out vec4 outColor;    // colortex6：「之后」= 手动合成光照 /「之前」= 随写 0（deferred 覆盖）
+layout(location = 2) out vec4 outColor;    // colortex6：「之后」= 直通 (lit, alpha) 硬件混合 /「之前」= 随写 0（no-op）
 
 void main() {
     vec4 color = texture(tex, vTexCoord) * vColor;
@@ -58,16 +68,22 @@ void main() {
     // 路径的合成先取原始纹理 alpha
     float texAlpha = color.a;
 
-    ivec2 pixel = ivec2(gl_FragCoord.xy);
     if (vAfterDeferred > 0.5) {
-        // deferred 之后：轻量光照手动合成——背景取 gaux3（= colortex6 主颜色，deferred_init 写入；
-        // 主颜色放 colortex6 正是为 gbuffers 阶段可采样——colortex0~3 采样单元被游戏纹理占用）；
-        // 合成结果写回 colortex6，后续半透明层链式叠加背景正确；colortex4/5 本分支不写（见头注）
+        // deferred 之后：简单光照（forwardEntityShade——直射 + 天光 + 方块光，阴影单 tap 最简档；
+        // 导数法线 / labPBR 贴图法线与「之前」路径打包进 gbuffer 的同一根 gbufferViewNormal）
+        // 后直通 (lit, alpha)、colortex6 per-buffer 硬件 alpha 混合原子合成
+        //（同 draw 内重叠片段定序正确、跨 draw 链式叠加正确；曾为 gaux3 fetch + mix 手动合成——
+        // 读正在写的附件个别驱动未定义 + 同 draw 竞态，2026-10 兼容性标准化移除，见头注）；
+        // colortex4/5 本分支不写（无读者，见头注）
         vec2 lm = remapLightmap(vLmcoord);
-        vec3 lit = forwardLightmapShade(srgbToLinear(color.rgb), lm, vSkyAmbient);
-        outColor = vec4(mix(texelFetch(gaux3, pixel, 0).rgb, lit, texAlpha), 1.0);
+        vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);
+        vec3 lit = forwardEntityShade(srgbToLinear(color.rgb), viewNormal, lm, vViewPos,
+                                      vLightDirection, vDirectIrradiance, vDirectTransmittance,
+                                      vSkyAmbient);
+        outColor = vec4(lit, texAlpha);
     } else {
-        // deferred 之前：几何进 colortex4/5（deferred_init 延迟光照）；colortex6 随写 0、覆盖
+        // deferred 之前：几何进 colortex4/5（deferred_init 延迟光照）；colortex6 随写 0（per-buffer
+        // 混合下 alpha 0 = 精确 no-op；deferred_init 全屏覆盖、语义等效）
         color.a = MATERIAL_NONE;
         vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);
         outMaterial = packGbufferMaterial(color, vTexCoord);
@@ -91,6 +107,18 @@ void main() {
     // 天空 LUT、有效性出参不消费（局部变量即丢弃）
     float lutValid;
     vSkyAmbient = skyAmbientColor(lutValid);
+
+    // ---- 直射帧数据（与通用全屏 vsh / gbuffers_translucent 同名同式，见 program/fullscreen_vsh.glsl；
+    // 取值实现已收敛进 lib/lighting/ambient.glsl 的 frameDirectIrradiance 单真源；「之后」路径的
+    // forwardEntityShade 消费、「之前」路径不消费由链接器剔除）----
+    vLightDirection = normalize(viewToWorldDirection(shadowLightPosition));
+    vDirectIrradiance = frameDirectIrradiance(sin(sunAngle * TAU),
+                                              normalize(viewToWorldDirection(moonPosition)).y);
+    // 相机高度近似的直射透射率（shadeSurface 的 directTransmittance 同式）：与「之前」路径的
+    // 延迟光照实体同屏时直射色 / 量级一致（日落红化同步）
+    vDirectTransmittance = exp(-opticalDepthToSpace(EARTH_RADIUS + max(cameraPosition.y, 1.0),
+                                                    vLightDirection.y));
+
     // pass 顺序判定一次（vsh 顶点级，fsh 经 flat varying 消费）
     vAfterDeferred = isAfterDeferred() ? 1.0 : 0.0;
 }

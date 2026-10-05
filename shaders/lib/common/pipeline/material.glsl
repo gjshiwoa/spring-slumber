@@ -32,9 +32,17 @@ bool isVegetationId(float blockId) {
 // 观察空间法线：导数 cotangent TBN 变换 labPBR 贴图法线（*2-1，不翻 Y，春雷 / 春v2 同约定），
 // 无 normals 纹理时贴图为 (0.5, 0.5, 1.0)、结果即导数几何法线。调用纪律：dp / duv 导数必须在
 // discard 之前集中求好传入（discard 后 quad 内幸存像素的导数未定义）
-vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord) {
+// 额外返回 TBN 第三列：湿面压平复用同一几何法线，不重复 cross / normalize。
+vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord, out vec3 geomNormalView) {
     mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
+    geomNormalView = tbn[2];
     return normalize(tbn * (texture(normals, texCoord).rgb * 2.0 - 1.0));
+}
+
+// 其他 gbuffer 消费方维持原接口；未消费的 out 值可由编译器剔除。
+vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord) {
+    vec3 geomNormalView;
+    return gbufferViewNormal(dp1, dp2, duv1, duv2, texCoord, geomNormalView);
 }
 
 // colortex4 输出：rg = 打包 albedo（rgba 已带标记位 a）、ba = 打包高光贴图 RGBA（labPBR 全量）

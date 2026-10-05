@@ -10,18 +10,18 @@ uniform sampler2D specular; // 高光贴图（labPBR 约定，r = smoothness，g
 
 uniform sampler2D colortex1; // bloom tile 图集（composite4~8 下采样、composite9~12 上采样回卷，tile0 终态 = 合并后的完整泛光，final 消费 tile0、composite12 测光读 tile4）+ 云形状场槽位（图集右侧 r 通道，布局见 bloom.glsl 的 cloudFieldRect——deferred 槽生成、deferred_init 伪自阴影探针读，见 clouds.glsl）。gbuffers 阶段不可采样（同上）
 uniform sampler2D colortex3; // TAA 历史缓冲（clear = false）：rgb = 上帧混合色，a = 上帧最近片元线性深度；仅 composite_taa 读写。gbuffers 阶段不可采样（同上）
-uniform sampler2D colortex4; // gbuffer: rg = 打包 albedo（4x8→2x16），ba = 打包高光贴图 RGBA；deferred_init 解包消费，此后帧内无读者、内容留存至帧末。**gbuffers 阶段读须用别名 gaux1**
+uniform sampler2D colortex4; // gbuffer: rg = 打包 albedo（4x8→2x16），ba = 打包高光贴图 RGBA；deferred_init 解包消费后整面覆写为**曝光归一化背景快照**（编码式见 constants.glsl 的 WATER_BG_SNAPSHOT_HEADROOM——RGBA16 [0,1] 域装下 HDR，water 折射 / SSR 位移采样的稳定背景）。**gbuffers 阶段读须用别名 gaux1**
 uniform sampler2D colortex5; // gbuffer: rg = 八面体观察空间法线，ba = 原始 lmcoord；光照接入后读取。**gbuffers 阶段读须用别名 gaux2**
-uniform sampler2D colortex6; // 场景主颜色缓冲（RGBA16F），deferred_init 初始化、前向半透明 after 路径合成（textured 族手动 fetch——**gbuffers 阶段读须用别名 gaux3**；water / hand_water / weather 走引擎硬件混合直写、无 fetch）、composite_taa 抗锯齿，final 读取后直接输出屏幕（不再写回）。放 colortex6 而非惯例的 colortex0：前向半透明须在 gbuffers 阶段采样主颜色作合成背景，而 colortex0~3 的采样单元在该阶段被游戏纹理 / 深度绑定占用（colortex0 即几何纹理 tex，实测采样返回纹理图集内容——water 曾因此把图集画上屏幕），colortex0 全程未使用
+uniform sampler2D colortex6; // 场景主颜色缓冲（RGBA16F），deferred_init 初始化、前向半透明 after 路径合成（2026-10 兼容性标准化：**全部 colortex6 写入者输出 (色, alpha) 交硬件 alpha 混合直写〔时机两可族经 per-buffer 行、water 族经引擎默认半透明混合〕、gbuffers 阶段无任何 fetch**——gaux3 手动合成全面废止，读正在写的附件在个别驱动未定义）、composite_taa 抗锯齿，final 读取后直接输出屏幕（不再写回）。放 colortex6 而非惯例的 colortex0 的历史缘由：colortex0~3 的采样单元在 gbuffers 阶段被游戏纹理 / 深度绑定占用（colortex0 即几何纹理 tex，实测采样返回纹理图集内容——water 曾因此把图集画上屏幕），colortex0 全程未使用
 
 // gaux1~4 = colortex4~7 的采样别名（gbuffers 阶段读缓冲的规范名——deferred / composite / final 阶段
 // 两者同单元等价、均可用；gbuffers 程序一律用 gaux 名，见各 colortex 注释）
-uniform sampler2D gaux1; // = colortex4：gbuffer albedo / 高光（before-deferred 手动合成类 color / beacon 外壳的背景读取）
+uniform sampler2D gaux1; // = colortex4：帧内两阶段——before-deferred 手动合成类（color / beacon 外壳）读 gbuffer 背景包装；deferred_init 之后 = 曝光归一化背景快照（water 折射 / SSR 采样 × vBgDecodeScale 解码）
 uniform sampler2D gaux2; // = colortex5
-uniform sampler2D gaux3; // = colortex6：场景主颜色（textured 族 after 路径手动合成的背景——读正在写的缓冲与手动合成类同款已知取舍；water 族走引擎混合、不 fetch）
+uniform sampler2D gaux3; // = colortex6：场景主颜色（**gbuffers 阶段已无读者**——2026-10 兼容性标准化：所有写 colortex6 的 gbuffer 一律 (色, alpha) 直通 + 硬件混合〔时机两可族 per-buffer 行 / water 族引擎默认〕，读正在写的附件废止；声明保留为 gaux 别名族完整性的文档位，composite 阶段读主颜色用 colortex6 名）
 uniform sampler2D gaux4; // = colortex7：杂项簇（pass 顺序标记、天空 LUT 探针——ambient.glsl / pass_order_marker.glsl 经本名采样，gbuffers vsh 消费）
 
-uniform sampler2D colortex7; // 杂项数据缓冲（clear = false，左下角杂项簇）：曝光槽位 1 texel（exposure.glsl 的 exposureTexel）= 自适应曝光（composite12 写、composite_taa 与 final 读）、天空 view LUT 200×200（太阳半区 + 月亮半区，deferred_init 读）、预留天空盒 256×256
+uniform sampler2D colortex7; // 杂项数据缓冲（clear = false，左下角杂项簇）：云层天空盒 256×256（八面体烘焙云，composite12 写 / water 反射经 gaux4 读）+ 曝光槽位 1 texel（exposure.glsl 的 exposureTexel）= 自适应曝光（composite12 写、composite_taa 与 final 读）、天空 view LUT 200×200（太阳半区 + 月亮半区，deferred_init 读）、aerial 透视 LUT 64×192（(460,0) 起，composite_fog 读）
 
 uniform sampler2D depthtex0; // 深度缓冲（全部几何）；deferred 时刻除不透明外可能已含 deferred 前绘制的 textured 族（粒子 / 闪电）深度，天空判定须用 depthtex1；composite 时刻含半透明与手，TAA 重投影取十字最近片元
 uniform sampler2D depthtex1; // 深度缓冲（仅不透明几何，含手部；粒子等非不透明写入被排除）：deferred_init 天空判定 / 光照位置重建用
@@ -54,6 +54,7 @@ uniform vec3 shadowLightPosition; // 当前主导光源（白天太阳 / 夜晚�
 uniform float sunAngle;     // 太阳角度 [0,1)，0 = 日出，0.25 = 正午，0.5 = 日落，0.75 = 午夜
 uniform float rainStrength; // 雨强度 [0,1]
 uniform int isEyeInWater;   // 0 = 大气中 / 1 = 水中 / 2 = 熔岩中（水下效果扩展点）
+uniform ivec2 eyeBrightnessSmooth; // 眼位光照级的引擎平滑值（x = 方块光 / y = 天光，各 0..240、进出光照平滑过渡）：水下雾亮度随环境光调制（lib/water/fog.glsl 的 waterUwEnvLight）
 
 // ---- 阴影贴图（program/shadow.glsl 写入 + lib/lighting/shadow.glsl 采样）----
 uniform mat4 shadowModelView; // 相对世界（当帧相机为原点、与 gbufferModelView 同源空间）-> shadow 视图

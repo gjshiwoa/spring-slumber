@@ -7,6 +7,36 @@
 // smoothstep 加权双线性（iq: Texture - Better Filtering，春雷同款）：
 // 单次采样、仅多几个 ALU，把双线性的线性插值权重换成 3t²-2t³ 平滑曲线，观感接近 bicubic
 // https://www.shadertoy.com/view/XsfGDn
+//
+// ---- 上游许可（该 shader 代码头自带的 MIT 声明，原样保留；依 MIT 条款：版权与许可声明须随
+//      副本保留。lib/water/waves.glsl 的 waterNoiseTexel 与 lib/lighting/caustics.glsl 的
+//      causticsNoiseTexel 为同一实现的就地镜像，同受本声明覆盖）----
+//
+// The MIT License
+// Copyright © 2013 Inigo Quilez
+// https://www.youtube.com/c/InigoQuilez
+// https://iquilezles.org/
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// 上游自述：This is the implementation for my article "improved texture interpolation"
+// https://iquilezles.org/articles/texture
 vec3 textureNice(sampler2D src, vec2 uv) {
     vec2 resolution = vec2(textureSize(src, 0));
     uv = uv * resolution + 0.5;
@@ -96,6 +126,31 @@ vec4 catmullRom5(sampler2D src, vec2 uv, vec2 texSize, float sharpenAmount) {
 
     return result / weightSum;
 }
+
+// 上游许可（AMD FidelityFX FSR1，随所引 SDK 文件发布、依 MIT 条款原样保留于下；
+// rcasLobe 为其实质部分的适配拆分）：
+//
+// MIT License
+//
+// Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
 // RCAS 锐化增益（AMD FidelityFX FSR1 Robust Contrast Adaptive Sharpening，移植自春雷
 // filters.glsl 的 RcasFilter——FSR3 SDK fsr1 头版本、含 lowerLimiterMultiplier 稳健限幅：

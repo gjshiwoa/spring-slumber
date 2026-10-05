@@ -11,19 +11,24 @@
 //     原子合成进 colortex6——手动「texelFetch 背景 + mix」的读改写在同一 draw 内重叠半透明片段
 //     间是竞态、逐帧结果不同 = 重叠处纹理闪烁，雨丝交叉实测；跨 draw 亦天然正确、无「读正在写
 //     的缓冲」取舍）；单附件 DRAWBUFFERS:6（下放入口）、colortex4/5 完全不写
-//   deferred 之后 + 手动档（textured 族入口）：同式轻量着色后手动 alpha 合成——背景 fetch
-//     gaux3（= colortex6 主颜色）+ mix 写回，跨 draw 链式叠加正确，同 draw 重叠竞态为本档残余
-//     （粒子 / 闪电交叠偶发）；colortex4/5 本分支不写——gbuffer 读者（deferred_init 几何分支）
-//     只读 depthtex1 < 1 像素、该区域每帧被不透明 gbuffers 先行整写，遗留内容活不到读者面前
+//   deferred 之后 + 混合档（textured 族入口）：同式轻量着色后输出直通 (lit, alpha)、colortex6 经
+//     **per-buffer 硬件 alpha 混合**原子合成（ROP 按提交序叠层——同 draw 内重叠半透明片段定序
+//     正确、跨 draw 链式叠加正确；shaders.properties `blend.<阶段>.colortex6 = SRC_ALPHA
+//     ONE_MINUS_SRC_ALPHA ZERO ONE`〔春v2 逐缓冲格式〕、程序级 off 只关 colortex4/5）。曾为
+//     「gaux3 fetch 背景 + mix 写回」手动档——读正在写的附件在个别驱动未定义、同 draw 重叠片段
+//     读改写竞态逐帧闪（粒子 / 闪电交叠偶发），2026-10 兼容性标准化移除；colortex4/5 本分支不写
+//     ——gbuffer 读者（deferred_init 几何分支）只读 depthtex1 < 1 像素、该区域每帧被不透明
+//     gbuffers 先行整写，遗留内容活不到读者面前
 //   deferred 之前（textured 族的 OptiFine 默认位，粒子 / 闪电由此重新可见）：不计算光照，几何
 //     打包写 colortex4/5（与 gbuffers_opaque 同格式：albedo+标记 / 导数法线 / lmcoord，标记置空——
-//     半透明混合类纪律），deferred_init 解包延迟光照；colortex6 随写 0（deferred_init 全屏覆盖）
-//     ——本位要求引擎混合关（打包整像素写入、shaders.properties 含回退链各阶段名）；FORWARD_
-//     HW_BLEND 档恒不达（hand_water / weather 恒 deferred 后）、不写 gbuffer。lightning 原加色
-//     混合亦归 alpha 合成（其 deferred 前本被覆盖不可见，可见时机修复后按需加自发光分支——春v2
-//     LIGHTNING 宏同位职责）
+//     半透明混合类纪律），deferred_init 解包延迟光照；colortex6 随写 0——colortex6 的 per-buffer
+//     混合下 alpha 0 = 精确 no-op（旧「整像素覆盖 0」语义属全 draw 关混合时代，两种语义此处等效：
+//     deferred_init 全屏覆盖）；colortex4/5 的打包整像素写入由程序级 off 保护（同 draw 内与
+//     colortex6 的混合路径并存互不干扰）。FORWARD_HW_BLEND 档恒不达（hand_water / weather 恒
+//     deferred 后）、不写 gbuffer。lightning 原加色混合亦归 alpha 合成（其 deferred 前本被覆盖
+//     不可见，可见时机修复后按需加自发光分支——春v2 LIGHTNING 宏同位职责）
 // DRAWBUFFERS 下放入口文件（多入口输出不同，同 composite_bloom_upsample 惯例）：
-// FORWARD_HW_BLEND 档 6（hand_water / weather）、手动档 456（textured / textured_lit）
+// FORWARD_HW_BLEND 档 6（hand_water / weather）、混合档 456（textured / textured_lit）
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"
@@ -48,19 +53,17 @@ flat VARYING float vAfterDeferred; // pass 顺序判定 0/1（flat float——bo
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
-// DRAWBUFFERS 在入口文件：FORWARD_HW_BLEND 档 6（单附件、引擎混合）/ 手动档 456（多入口输出不同）
+// DRAWBUFFERS 在入口文件：FORWARD_HW_BLEND 档 6（单附件）/ 混合档 456（多入口输出不同）
 
 #ifdef FORWARD_HW_BLEND
-layout(location = 0) out vec4 outColor; // colortex6：直通 (lit, alpha)、引擎 ROP 原子合成
+layout(location = 0) out vec4 outColor; // colortex6：直通 (lit, alpha)、ROP 原子合成（引擎默认半透明混合——blend 行已移除、恒 deferred 后）
 #else
 layout(location = 0) out vec4 outMaterial; // colortex4：「之前」= 打包几何 /「之后」= 不写（无读者）
 layout(location = 1) out vec4 outDetail;   // colortex5：同上
-layout(location = 2) out vec4 outColor;    // colortex6：「之后」= 手动合成光照 /「之前」= 随写 0（deferred 覆盖）
+layout(location = 2) out vec4 outColor;    // colortex6：「之后」= 直通 (lit, alpha) 硬件混合 /「之前」= 随写 0（no-op）
 #endif
 
 void main() {
-    vec4 color = texture(tex, vTexCoord) * vColor;
-
     // 导数先于 discard（「之前」路径 TBN 需要；纪律同 gbuffers_opaque——discard 后 quad 内幸存
     // 像素导数未定义，先集中求好；TBN 构造与 normals 采样推迟到分支内）
     vec3 dp1 = dFdx(vViewPos);
@@ -70,6 +73,11 @@ void main() {
 
     // TAAU 子区域外片元剔除（机制见 noise.glsl 的 outsideRenderRegion；半透明混合本无 Early-Z 顾虑）
     if (outsideRenderRegion()) discard;
+
+    // 图集 fetch 位于区域剔除之后（2026-10 性能）：TAAU 子区域外 band（屏幕覆盖型半透明几何的
+    // ~1−S² buffer 片元）不再白付一次 fetch 后才被丢弃——同 gbuffers_translucent 玻璃分支形态；
+    // discard 后隐式 LOD 采样与本程序 before 路径的 normals 采样同款实践（helper invocation 语义）
+    vec4 color = texture(tex, vTexCoord) * vColor;
     if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
 
     if (vAfterDeferred > 0.5) {
@@ -79,15 +87,16 @@ void main() {
 #ifdef FORWARD_HW_BLEND
         outColor = vec4(lit, color.a); // 直通 alpha、引擎 ROP 原子合成（draw 内重叠定序正确）
 #else
-        // 手动档：背景取 gaux3（= colortex6 主颜色，deferred_init 写入；主颜色放 colortex6 正是为
-        // gbuffers 阶段可采样——colortex0~3 采样单元被游戏纹理占用）；合成结果写回 colortex6、
-        // 跨 draw 链式叠加背景正确；colortex4/5 本分支不写（无读者，见头注）
-        ivec2 pixel = ivec2(gl_FragCoord.xy);
-        outColor = vec4(mix(texelFetch(gaux3, pixel, 0).rgb, lit, color.a), 1.0);
+        // 混合档：直通 (lit, alpha)、colortex6 per-buffer 硬件 alpha 混合原子合成（同 draw 内重叠
+        // 片段定序正确、跨 draw 链式叠加正确）。曾为「gaux3 fetch 背景 + mix 写回」手动 mix——
+        // 读正在写的附件在个别驱动未定义 + 同 draw 重叠片段读改写竞态，2026-10 兼容性标准化移除；
+        // colortex4/5 本分支不写（无读者，见头注）
+        outColor = vec4(lit, color.a);
 #endif
     } else {
         // deferred 之前：几何进 colortex4/5（deferred_init 延迟光照）；alpha 的 cutout 职责已尽、
-        // a 通道置空标记（半透明混合类纪律，实体入口同款）；colortex6 随写 0、deferred_init 覆盖。
+        // a 通道置空标记（半透明混合类纪律，实体入口同款）；colortex6 随写 0（colortex6 的
+        // per-buffer 混合下 alpha 0 = 精确 no-op；deferred_init 全屏覆盖、语义等效）。
         // FORWARD_HW_BLEND 档恒不达（hand_water / weather 恒 deferred 后）、不写 gbuffer
 #ifndef FORWARD_HW_BLEND
         vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);

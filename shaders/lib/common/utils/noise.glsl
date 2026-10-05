@@ -36,6 +36,31 @@ float temporalBayer64(vec2 pixelPos) {
 // ~1e4 量级内有界——消费方为角域坐标（云 = 世界 xz / 云壳半径，octave 放大后 ~10³~10⁴），该量级
 // 内精度无损；更大坐标域须换整数 hash（扩展点）
 
+// rand2 / hash13 / hash33 源自 "Hash without Sine"（https://www.shadertoy.com/view/4djSRW），
+// 其随代码发布的 MIT 声明原样保留于下（依 MIT 条款：版权与许可声明须随副本保留）：
+//
+// MIT License
+//
+// Copyright (c) 2014 David Hoskins
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 // [0,1)² hash（worley 特征点等）
 vec2 rand2(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
@@ -46,6 +71,20 @@ vec2 rand2(vec2 p) {
 // simplex 梯度向量（[-1,1]，rand2 同款 hash ×2−1）
 vec2 hash22(vec2 p) {
     return -1.0 + 2.0 * rand2(p);
+}
+
+// [0,1) / [0,1)³ 3D hash（rand2 同族，星盘点星消费——sky.glsl getStars 的立方体网格
+// 分格；星图坐标有界 [−1,1]³ × 网格密度 ~60，精度域内无忧）
+float hash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec3 hash33(vec3 p3) {
+    p3 = fract(p3 * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yxx) * p3.zyx);
 }
 
 // 解析 simplex 噪声（[-1,1]，IQ / Gustavson 构造）
@@ -92,7 +131,9 @@ vec4 applyTAAJitter(vec4 clipPos) {
 // uv 域补偿对：无抖动全视场 uv <-> buffer uv 互转（几何已 +jitter；屏幕空间追踪阴影 / 未来 SSR /
 // SSAO 等的采样一致性用，春雷同款 + TAAU 补全）。TAAU：几何先缩进左下 [0,S]² 子区域再叠 jitter，
 // buffer uv = 全视场 uv·S + jitter——与 deferred_init 去抖基底 (像素uv − vJitter)/S 严格互逆；
-// 不补 ×S 时补偿随 S 缩水（S=0.5 只剩 1/4）、采样错位 ~0.375 渲染纹素（TAAU 糊/闪同因）
+// 不补 ×S 时补偿随 S 缩水（S=0.5 只剩 1/4）、采样错位 ~0.375 渲染纹素（TAAU 糊/闪同因）。
+// applyJitter 消费方 = 屏幕空间追踪阴影〔仿射系数探针反解〕+ 水面 SSR〔2D SSPT 端点折叠，
+// 2026-10 起〕；applyInverseJitter 的 jitter 参数版 = 各 pass 位置重建基底（见函数注）
 vec2 applyJitter(vec2 uv) {
 #ifdef TAAU
     uv *= RENDER_SCALE;
@@ -100,12 +141,22 @@ vec2 applyJitter(vec2 uv) {
     return uv + taaJitterUV();
 }
 
-vec2 applyInverseJitter(vec2 uv) {
-    uv -= taaJitterUV();
+// 去抖重载（jitter 参数版 = 在树热路径）：入参 jitterUv 为调用方已持值——通用全屏 vsh 的 vJitter
+// varying / 前向 program vsh 的同名 varying / 调用点局部 jitter，免 taaJitterUV 的每像素 Halton 表
+// 动态索引 + 除法重算（2026-09 性能纪律，原各 pass 内联手抄本式、2026-10 收敛回本函数）。
+// 消费方：deferred_init / composite_fog 的位置重建基底、lib/water/surface.glsl 的去抖 / 折射 /
+// 命中点换算、lib/post/taa.glsl 的重投影锚点——「buffer uv → 无抖动全视场 uv」全树单真源
+vec2 applyInverseJitter(vec2 uv, vec2 jitterUv) {
 #ifdef TAAU
-    uv /= RENDER_SCALE;
+    return (uv - jitterUv) / RENDER_SCALE;
+#else
+    return uv - jitterUv;
 #endif
-    return uv;
+}
+
+// 便捷版（自算 jitter）：非热路径 / 无 varying 可持时用；与参数版同一实现
+vec2 applyInverseJitter(vec2 uv) {
+    return applyInverseJitter(uv, taaJitterUV());
 }
 
 // ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段） ----------------

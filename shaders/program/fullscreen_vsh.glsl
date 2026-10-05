@@ -23,7 +23,9 @@
 // 依赖先行 include：constants.glsl（TAU / 大气与光照常量、SKYVIEW_*、CLOUDS_2D 开时的
 //   CLOUDS_2D_HEIGHT）、uniforms.glsl（光源位置 / sunAngle / rainStrength / cameraPosition /
 //   colortex7 / frameCounter / 视口）、utils/space.glsl、utils/noise.glsl（taaJitterUV）、
-//   lib/lighting/ambient.glsl（skyAmbientColor）、lib/post/exposure.glsl（readAdaptedExposure
+//   lib/lighting/ambient.glsl（skyAmbientColor / frameDirectIrradiance / observerHorizonGeometry——
+//   vDirectIrradiance 与 vHorizon 的取值实现，各「自带 vsh 输出同名 varying」的 pass 共用单真源）、
+//   lib/post/exposure.glsl（readAdaptedExposure
 //   及其依赖链）；定义 FULLSCREEN_DIRECT_TRANSMITTANCE
 //   或 FULLSCREEN_CLOUD_TRANSMITTANCE 时还需 lib/atmosphere/atmosphere.glsl（opticalDepthToSpace）
 #ifndef PROGRAM_FULLSCREEN_VSH_GLSL
@@ -72,19 +74,18 @@ void main() {
     vMoonDirection = normalize(viewToWorldDirection(moonPosition));
     vLightDirection = normalize(viewToWorldDirection(shadowLightPosition));
 
-    // ---- 统一时间系统（常量依据见 constants.glsl 光照分区）----
-    // 太阳 / 月亮各自世界高度的线性门：日月恰好相对、两门永不同时为正，门控加权和即「按光源选边 +
-    // 切换瞬间双 0 黑过渡」；晨昏主光源切换的阴影跳变由本黑过渡吸收
+    // ---- 统一时间系统（常量依据见 constants.glsl 光照分区；门控加权和的取值实现 =
+    // lib/lighting/ambient.glsl 的 frameDirectIrradiance，与前向 program / composite12 云烘焙
+    // 的自带 vsh 单真源共用——「同名同式」由函数共用结构性保证）----
     vSunHeight  = sin(sunAngle * TAU);
     vMoonHeight = vMoonDirection.y;
     vNoonFactor  = clamp(vSunHeight  * TIME_NOON_RAMP,  0.0, 1.0);
     vNightFactor = clamp(vMoonHeight * TIME_NIGHT_RAMP, 0.0, 1.0);
+    vDirectIrradiance = frameDirectIrradiance(vSunHeight, vMoonHeight);
 
-    vDirectIrradiance = (vNoonFactor * SOLAR_IRRADIANCE + vNightFactor * MOON_IRRADIANCE)
-                      * (1.0 - 0.75 * rainStrength);
-
-    // 观察者地平线几何（与 sky.glsl 生成端 skyViewLutTexel 同式）：
-    // beta = 地平线到天底的角跨度、zenithHorizon = 天顶到地平线的角跨度
+    // 观察者地平线几何（与 sky.glsl 生成端 skyViewLutTexel 同式，取值实现 = ambient.glsl 的
+    // observerHorizonGeometry——本 vsh / gbuffers_translucent 的自带 vsh / composite12 LUT 生成端
+    // 三处共用单真源）：beta = 地平线到天底的角跨度、zenithHorizon = 天顶到地平线的角跨度
     float r = EARTH_RADIUS + max(cameraPosition.y, 1.0);
 #ifdef FULLSCREEN_DIRECT_TRANSMITTANCE
     // 用玩家 / 相机高度近似全部可见表面海拔；全屏顶点仅计算 3~4 次，deferred 直接插值复用。
@@ -95,10 +96,7 @@ void main() {
     // 与 vDirectTransmittance 同式同源，日落时云比地面更晚变红（高处光学深度小）
     vCloudTransmittance = exp(-opticalDepthToSpace(EARTH_RADIUS + CLOUDS_2D_HEIGHT, vLightDirection.y));
 #endif
-    float altitudeTerm = max((r - EARTH_RADIUS) * (r + EARTH_RADIUS), 0.0);
-    float cosBeta = sqrt(altitudeTerm) / r;
-    float beta = acos(cosBeta);
-    vHorizon = vec3(cosBeta, beta, PI - beta);
+    vHorizon = observerHorizonGeometry();
 
     // 天空 view LUT 有效性探针 + 天空环境基色（取值实现 lib/lighting/ambient.glsl 的 skyAmbientColor，
     // 与前向 program〔简单半透明〕的 vsh 共用同一实现）：探针 fetch 双重职责——rgb = 各光源天顶色作

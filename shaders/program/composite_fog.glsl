@@ -15,7 +15,10 @@
 // 全屏 vsh 的同名 varying。几何分支另施加**大气散射雾 / 空气透视**（lib/atmosphere/aerial.glsl 的
 // applyAerialPerspective，AERIAL_PERSPECTIVE 宏门控、边界雾之前）：物理式 surface × T + S——中近距
 // 物理空气感（方向性 / 色彩 / 曙暮光分层），与边界雾两段式分工（boundary 兜 far 端渲染边界融接）；
-// 天空像素不施加（不变式③）。BOUNDARY_FOG 与 AERIAL_PERSPECTIVE **两宏全关**时整 pass 透传旁路——
+// 天空像素不施加（不变式③）。另接入**水下雾**（WATER_FOG 宏，lib/water/fog.glsl 的
+// applyUnderwaterFog：isEyeInWater == 1 时按 depthtex0 表面距离的整屏吸收雾——与 gbuffers_water
+// 的水面框架同源、雾色光照共用单真源）。BOUNDARY_FOG / AERIAL_PERSPECTIVE / WATER_FOG **三宏全关**时
+// 整 pass 透传旁路——
 // colortex6 同位置 fetch 原样写回（不可 discard：读改写 pass 的输出经引擎 ping-pong 翻转进下一 pass，
 // 丢弃 = 翻转目标保持帧头 clear 黑 → 黑屏，机制见 main 内注释）；单关其一 = 该段编译剔除、另一段照常
 
@@ -26,12 +29,17 @@
 #include "/lib/common/utils/space.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/common/utils/packing.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/lib/lighting/ambient.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
 #include "/lib/atmosphere/sky.glsl"
 #include "/lib/atmosphere/aerial.glsl"
 #include "/lib/atmosphere/fog.glsl"
+#include "/lib/atmosphere/clouds.glsl"
+// 水下雾（2026-10 自 lib/lighting/water.glsl 按功能拆分——本 pass 只消费 fog.glsl 的
+// applyUnderwaterFog，波场 / SSR / 主着色不进本链）
+#include "/lib/water/fog.glsl"
 #include "/program/fullscreen_vsh.glsl"
 
 // ================================ FRAGMENT ================================
@@ -40,17 +48,20 @@
 /* DRAWBUFFERS:6 */
 
 // 通用全屏 vsh 输出的帧数据——按需 in 声明（vJitter 与 deferred_init 同款消费：去抖基底
-// 「像素 uv − vJitter」，TAAU 再 /S）；getSkyColor 入参族（fog.glsl 雾色采样）
+// 「像素 uv − vJitter」，TAAU 再 /S）；getSkyColor 入参族（fog.glsl 雾色采样）；vDirectIrradiance /
+// vSkyAmbient 为水下雾的雾色光照（lib/water/fog.glsl 的 applyUnderwaterFog 消费）
 in vec2 vJitter;
 in vec3 vSunDirection;
 in vec3 vMoonDirection;
 in vec3 vHorizon;
+in vec3 vDirectIrradiance;
+in vec3 vSkyAmbient;
 flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁器 / 部分驱动所容）
 
 layout(location = 0) out vec4 outColor; // colortex6：雾化后的场景颜色
 
 void main() {
-#if !defined(BOUNDARY_FOG) && !defined(AERIAL_PERSPECTIVE)
+#if !defined(BOUNDARY_FOG) && !defined(AERIAL_PERSPECTIVE) && !defined(WATER_FOG)
     // 两雾宏全关：整 pass 透传旁路。不可 discard——本 pass 读改写 colortex6（DRAWBUFFERS:6 + uniforms
     // 采样器声明），引擎 ping-pong 把输出翻到另一份缓冲，discard 时那份从未被写入、保持帧头
     // clear 黑，composite_taa 读到全黑 → 黑屏（2026-09 实测修复）；透传写回保持翻转语义、
@@ -63,13 +74,10 @@ void main() {
     float depth = texelFetch(depthtex0, pixel, 0).r;
     bool skyPixel = depth >= 1.0;
 
-    // 去抖全视场 uv（buffer uv → 无抖动全视场 uv，与 deferred_init 基底严格同式；jitter 经
-    // vJitter varying 传入——vsh 侧同一 taaJitterUV 实现，全 quad 恒定值的插值舍入 ~1e-11 px）
-#ifdef TAAU
-    vec2 uv = (gl_FragCoord.xy / vec2(viewWidth, viewHeight) - vJitter) / RENDER_SCALE;
-#else
-    vec2 uv = gl_FragCoord.xy / vec2(viewWidth, viewHeight) - vJitter;
-#endif
+    // 去抖全视场 uv（buffer uv → 无抖动全视场 uv，与 deferred_init 基底严格同式；公式单真源 =
+    // noise.glsl 的 applyInverseJitter 参数版——jitter 经 vJitter varying 传入，免 taaJitterUV 的
+    // 每像素 Halton 表动态索引与除法重算，全 quad 恒定值的插值舍入 ~1e-11 px）
+    vec2 uv = applyInverseJitter(gl_FragCoord.xy / vec2(viewWidth, viewHeight), vJitter);
 
     // 天空像素 z = 1 落在远平面（不归一化，雾函数内部只取方向）；几何像素取本像素原始
     // 深度。重建走 screenToViewCanonical 典则透视闭式（与 screenToView 代数恒等、免每像素
@@ -78,6 +86,14 @@ void main() {
     // 门 fade = 0；boundary：距离因子 0），本 pass 常态成本 = 2 fetch + 闭式重建（1 div）+ 1 length
     vec3 viewPos = screenToViewCanonical(uv, depth);
     vec3 color = texelFetch(colortex6, pixel, 0).rgb;
+#ifdef WATER_FOG
+    // 水下雾（lib/water/fog.glsl 的 applyUnderwaterFog，方案移植自春v2 waterFog / underWaterFog）：
+    // 相机在水中的整屏吸收雾，按 depthtex0 表面距离结算——水面像素的水下观视（折射 / 反射 / Fresnel）
+    // 已在 gbuffers_water 处理、此处只按「眼到该表面」的路径吸收（两路不重复计费）；aerial / boundary
+    // 在水下各自早退（lib 内 isEyeInWater 判定），水下只余本段
+    if (isEyeInWater == 1)
+        applyUnderwaterFog(color, viewPos, skyPixel, vDirectIrradiance, vSkyAmbient);
+#endif
 #ifdef AERIAL_PERSPECTIVE
     // 空气透视先行（不变式③：天空像素不施加——渐近一致性只在几何侧成立）；与边界雾两段式
     // 叠加（0.7~0.9·far 带 double-dip 为风格化取舍，调参联动见 AGENTS.md）

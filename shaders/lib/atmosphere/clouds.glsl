@@ -23,16 +23,25 @@
 // 结构：云壳求交（云下仰视穿出 / 云上俯视云顶 / 行星遮挡统一处理）→ 角坐标（交点 xz ÷ 云壳
 // 半径——数值域有界使 hash 输入坐标有界；远交点在角域自然压缩 = Kappa 距离压缩的解析等价，
 // 地平线不闪）→ warp 微扰 + 6 octave simplex fbm（各 octave 差速演变）→ coverage 重映射 /
-// smoothstep 二次锐化 → alpha = 密度 × 距离衰减 → KN 前向散射相位照明。画在 deferred_init 天空
-// 分支（TAA 之前）、预乘合成 cloud.rgb + 天空 × cloud.a。
+// smoothstep 二次锐化 → alpha = 密度 × 距离衰减 → KN 前向散射相位照明。两个消费方：
+//   deferred_init 天空分支（TAA 之前）逐像素直接求值、预乘合成 cloud.rgb + 天空 × cloud.a；
+//   composite12 云层天空盒烘焙（getPlanarCloudsWorld，2026-10）逐 texel 全量重算写 colortex7
+//   八面体槽位 [0,256)²、water 反射未命中 SSR 侧经 sky.glsl 的 sampleCloudSkybox 单 fetch 消费
+//   ——「反射不重算云」的烘焙路线，主天空不降档。
 //
 // 依赖由接入的 program 先行 include（lib 文件不嵌套）：constants.glsl（CLOUDS_2D_* /
 //   EARTH_RADIUS）、uniforms.glsl（cameraPosition / frameTimeCounter / rainStrength / colortex1——
-//   云形状场采样）、lib/post/bloom.glsl（cloudFieldRect 场槽位矩形）、utils/space.glsl
-//   （viewToWorldDirection）、utils/noise.glsl（rand2 / simplex2d）。
+//   云形状场采样）、lib/post/bloom.glsl（cloudFieldRect 场槽位矩形）、utils/noise.glsl
+//   （rand2 / simplex2d；原视图壳的 utils/space.glsl 依赖已随其删除移除，2026-10）。
 //   仅片段阶段（与 deferred_init / deferred_cloud_field 调用点约定一致）
 #ifndef LIB_CLOUDS_GLSL
 #define LIB_CLOUDS_GLSL
+
+// CLOUDS_2D 外层守卫（2026-10 维度极简档）：CLOUDS_2D_* 常量族在 constants.glsl 的同宏分区内，
+// 宏关时（下界 / 末地经 DIM_NO_ATMOSPHERE 不定义）本文件须整体编译为空——deferred_init 等
+// 接入方仍平铺 include 本文件（调用点各自的 #ifdef CLOUDS_2D 门控不变），与 fog.glsl /
+// aerial.glsl 的同款自守卫纪律对齐
+#ifdef CLOUDS_2D
 
 #ifdef STAGE_FRAGMENT
 
@@ -76,17 +85,19 @@ vec2 cloudWarp(vec2 p) {
     return p - (1.0 - warp) * 0.001;
 }
 
-// 6 octave simplex fbm（lacunarity 2.5 / gain 0.5，春v2 sampleCloud2D 同款）；time 各 octave
-// ×1.1 差速——低频层平移快、高频层慢，云形在漂移之外持续自演变。入参须为 warp 微扰后的坐标
-//（cloudWarp 在调用方施加）
-float cloudSimplexFbm(vec2 warpedP) {
+// simplex fbm 核心（lacunarity 2.5 / gain 0.5，春v2 sampleCloud2D 同款）；time 各 octave ×1.1
+// 差速——低频层平移快、高频层慢，云形在漂移之外持续自演变。入参须为 warp 微扰后的坐标（cloudWarp
+// 在调用方施加）。octave 数参数化：主采样 6 档与云形状场生成端（CLOUDS_2D_FIELD_OCTAVES）共用
+// 同一 frequency / weight / time 序列——「两端严格一致」由单真源结构性保证（曾两处复制成对维护、
+// 注释明令「改动须两处联动」，2026-10 收敛）
+float cloudSimplexFbmN(vec2 warpedP, int octaves) {
     float frequency = CLOUDS_2D_SCALE;
     float weight = 1.0;
     float time = CLOUDS_2D_SPEED * frameTimeCounter;
 
     float noise = 0.0;
     float totalWeight = 0.0;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < octaves; i++) {
         noise += (simplex2d(warpedP * frequency + time) * 0.5 + 0.5) * weight;
         totalWeight += weight;
 
@@ -95,6 +106,11 @@ float cloudSimplexFbm(vec2 warpedP) {
         time *= 1.1;
     }
     return noise / totalWeight;
+}
+
+// 主采样 fbm（6 octave 全频形状）
+float cloudSimplexFbm(vec2 warpedP) {
+    return cloudSimplexFbmN(warpedP, 6);
 }
 
 // 噪声 → [0,1] 形状：coverage 重映射 + smoothstep 二次锐化（春v2 同款链路）。密度乘子
@@ -108,25 +124,10 @@ float cloudShape(float noise) {
 
 // 云形状场求值（生成端，deferred 槽的 deferred_cloud_field 逐 texel 调用）：世界锚定的低频云
 // 形状（warp + 前 CLOUDS_2D_FIELD_OCTAVES 个 octave 的 fbm + cloudShape），入参为角域坐标
-// p（= 世界 xz ÷ 云壳半径）。frequency / weight / time 序列与 cloudSimplexFbm 严格一致（改动须
-// 两处联动）；与主采样全频形状共享同一低频场——场与主形状的空间相关性由此保证。返回 [0,1]
+// p（= 世界 xz ÷ 云壳半径）。fbm 序列与主采样共用 cloudSimplexFbmN 单真源（同上注）；与主采样
+// 全频形状共享同一低频场——场与主形状的空间相关性由此保证。返回 [0,1]
 float cloudFieldShape(vec2 p) {
-    vec2 warpedP = cloudWarp(p);
-    float frequency = CLOUDS_2D_SCALE;
-    float weight = 1.0;
-    float time = CLOUDS_2D_SPEED * frameTimeCounter;
-
-    float noise = 0.0;
-    float totalWeight = 0.0;
-    for (int i = 0; i < CLOUDS_2D_FIELD_OCTAVES; i++) {
-        noise += (simplex2d(warpedP * frequency + time) * 0.5 + 0.5) * weight;
-        totalWeight += weight;
-
-        frequency *= 2.5;
-        weight *= 0.5;
-        time *= 1.1;
-    }
-    return cloudShape(noise / totalWeight);
+    return cloudShape(cloudSimplexFbmN(cloudWarp(p), CLOUDS_2D_FIELD_OCTAVES));
 }
 
 // 云形状场采样（消费端，deferred_init 探针 / 未来云影）：世界 xz → colortex1 场槽位 bilinear
@@ -153,13 +154,16 @@ float cloudPhase(float cosTheta) {
                  0.0, 1.0);
 }
 
-// 2D 平面云主入口（仅片段阶段）。dirView 视图空间视线（不要求归一化，getSkyColor 同款）；
-// 帧数据（主光源世界方向 / 直射辐照度 / 云高处透射率 / 天空环境基色）由调用方从 vsh 帧数据
-// varying 传入。返回：rgb = 散射亮度（预乘合成域：最终 color = cloud.rgb + skyColor × cloud.a）、
+// 世界系核心（dirWorld 须已归一化）——两个消费方（composite12 的云层天空盒烘焙：八面体纹素
+// 反解方向；deferred_init 天空分支：与 LUT / 日月盘 / 星盘共享一次归一的世界方向，2026-10 天空
+// 分支世界方向单次化）直入，免「世界→视图→世界」往返（getSkyColor / getSkyColorWorld 拆分同款
+// 纪律；原视图壳 getPlanarClouds 随最后一消费方转世界系直入而删，git 历史含完整形态）。帧数据
+//（主光源世界方向 / 直射辐照度 / 云高处透射率 / 天空环境基色）由调用方从 vsh 帧数据 varying
+// 传入；返回：rgb = 散射亮度（预乘合成域：最终 color = cloud.rgb + skyColor × cloud.a）、
 // a = 透射率
-vec4 getPlanarClouds(vec3 dirView, vec3 lightDirWorld, vec3 directIrradiance,
-                     vec3 cloudTransmittance, vec3 skyAmbient) {
-    vec3 dir = normalize(viewToWorldDirection(dirView));
+vec4 getPlanarCloudsWorld(vec3 dirWorld, vec3 lightDirWorld, vec3 directIrradiance,
+                          vec3 cloudTransmittance, vec3 skyAmbient) {
+    vec3 dir = dirWorld;
     vec3 origin = vec3(0.0, EARTH_RADIUS + cameraPosition.y, 0.0); // 行星中心系相机位置（球心 = 原点）
     float cloudRadius = EARTH_RADIUS + CLOUDS_2D_HEIGHT;
 
@@ -215,5 +219,7 @@ vec4 getPlanarClouds(vec3 dirView, vec3 lightDirWorld, vec3 directIrradiance,
 }
 
 #endif
+
+#endif // CLOUDS_2D
 
 #endif

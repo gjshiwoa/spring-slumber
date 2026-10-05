@@ -2,7 +2,9 @@
 // 线性 distortion + shadowtex0 硬件比较黄金螺旋 PCF（temporal bayer 时域旋转，composite_taa
 // 时间累积收敛为软阴影）+ shadowtex1 裸深度手动比较分离半透明遮挡、取 shadowcolor0 透射色
 // 上彩色阴影（春v2 getColorShadow 同款）——水面透射为焦散（a 通道水标记 ×WATER_CAUSTICS_BOOST
-// 重建 HDR，写入端 lib/lighting/caustics.glsl + program/shadow.glsl）。
+// 重建 HDR，写入端 lib/lighting/caustics.glsl + program/shadow.glsl；**人眼在水下时焦散随接收处
+// 水深变浅**——水透射分量乘渲染点 lm.y 的 pow2〔线性首档不可辨、pow4 首档太黑的折中〕，2026-10
+// 按反馈，见函数内「焦散水深门」段）。
 // PCSS 后路：tex1 保持裸深度，未来加 blocker search（读 tex1 浅于接收者的平均遮挡深度推半影
 // 半径、替换常数半径）即升级，引擎配置零改动。
 // 另含屏幕空间追踪阴影 screenSpaceShadowVisibility（SHADOW_SCREEN_SPACE 开关，方案见
@@ -25,8 +27,10 @@
 // distWorld   相机距离；出屏 / 超距返回 1（贴图覆盖外按全亮，无回退门控）
 // sssStrength 次表面散射强度 [0,1]（materialSSSStrength）——软半径 = SSS_SOFT_RADIUS_MAX × 强度
 //             线性增长，tap 越出叶片自身阴影边界使背光侧部分漏光（春v2 同构）
+// lmSky       接收面重映射后的天光 lm.y（[0,1] 线性光照级）——焦散水深门消费（见函数内「焦散
+//             水深门」段）；shadeSurface 的 lm 入参直传
 vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, float distWorld,
-                            float sssStrength) {
+                            float sssStrength, float lmSky) {
     if (distWorld > shadowDistance) return vec3(1.0);
 
     // normal offset：世界坐标沿法线偏移，随距离与坡度放大（春v2 同思路）——把接收点推出自阴影痤疮带
@@ -51,6 +55,17 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
     // 方向仍是均匀盘——两档共用 SHADOW_PCF_DIRS 表，仅径向归一化分母随档变化
     int sampleCount = radiusTexels > SHADOW_PCF_LOW_TIER_TEXELS
                     ? SHADOW_PCF_SAMPLES : SHADOW_PCF_SAMPLES_LOW;
+
+    // 焦散水深门（2026-10 按反馈「人在水下时，水越深焦散越浅」）：直接乘进半透明阴影（彩色阴影）
+    // 里的水透射分量——**isEyeInWater == 1 时** BOOST 乘渲染点 lm.y 的 **pow2**（一次连乘）：
+    // 水下接收面天光随水深逐格衰减（水光衰减 ~1 级/格），lm.y 即水深代理——浅水近满额、深水
+    // 焦散趋无；水上视角恒 1、原观感不变。档位收敛（线性 / pow4 两首档按反馈折中）：线性档
+    // 衰减不可辨（焦散网是 BOOST ×2.8 的 HDR 峰，浅中深的线性缩放经 AgX 压缩后看不出差），
+    // pow4 档水下整体太黑（水透射 = 水下全部直射光，2~3 格就砍半）；pow2 兼顾——3 格深
+    //（0.8）→ ×0.64、6 格（0.6）→ ×0.36、10 格（0.33）→ ×0.11，梯度可见且中深不至于黑死
+    //（深水的暗主要来自环境项自带的 lm.y⁴）。深水直射兜底仍在天光门 skyGate（本门只管焦散
+    // 网强度）；逐像素恒定、PCF 循环外一次算好
+    float causticBoost = WATER_CAUSTICS_BOOST * (isEyeInWater == 1 ? lmSky * lmSky : 1.0);
 
     // temporal bayer（春v2 同款）驱动盘相位：起始角乘非整系数 17.333 打散 bayer 相邻像素的规则
     // 角度差免取向条纹，径向相位同源单噪声驱动，帧间 golden ratio 步进整个盘旋转、时间累积解析为
@@ -88,7 +103,7 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
                 // 不走 srgbToLinear——存储值即线性透射因子、曲线已含在写入端，gamma 会二次压暗网谷。
                 // 其余透射几何维持 sRGB albedo → 线性
                 vec3 transmission = transmit.a < SHADOW_COLOR_WATER_TEST
-                                  ? transmit.rgb * WATER_CAUSTICS_BOOST
+                                  ? transmit.rgb * causticBoost
                                   : srgbToLinear(transmit.rgb);
                 tapVisibility = mix(transmission, vec3(1.0), allVis);
             }
@@ -109,6 +124,9 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
 }
 
 // ---------------- 屏幕空间追踪阴影（SHADOW_SCREEN_SPACE，仅片段阶段） ----------------
+
+// 与 constants.glsl 的常量门控配对，关宏时函数也须剔除，避免未定义常量的编译错误。
+#ifdef SHADOW_SCREEN_SPACE
 
 // 沿主光源方向对 depthtex1（不透明深度）的世界空间 ray march，一档追踪兼两职：近景补接触细节
 //（normal offset / PCF 模糊吃掉的小影）、远景接管（贴图 0.9D→D 淡出后为唯一阴影源，视距远超
@@ -224,6 +242,8 @@ float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld
                                    1.0, 0.0);
     return mix(1.0, visibility, edgeFade);
 }
+
+#endif // SHADOW_SCREEN_SPACE
 
 #endif
 

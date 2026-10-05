@@ -19,6 +19,7 @@
 #include "/lib/common/pipeline/waving.glsl"
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/pipeline/material.glsl"
+#include "/lib/common/pipeline/wetness.glsl"
 #include "/lib/common/utils/noise.glsl"
 
 VARYING vec2 vTexCoord;
@@ -55,7 +56,31 @@ void main() {
 
     // 观察空间法线与打包输出（函数在 lib/common/pipeline/material.glsl，与 entities / 前向半透明
     // 的「deferred 之前」路径共用；调用纪律：导数先于 discard 已求好）
-    vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);
+    vec3 geomNormalView;
+    vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord, geomNormalView);
+
+#if defined(WET_SURFACE) && defined(WET_SURFACE_GBUFFER)
+    // 雨天地表湿滑——湿面法线向几何面法线（= MC 方块逐面的顶点法线）压平（lib/common/pipeline/
+    // wetness.glsl 的 terrainWetness：露天 lm.y 门 × 水坑噪声 × 朝上度权重，与 deferred2 的 SSR
+    // 可见度同函数同输入；2026-10 侧面接入——顶面满档压平、侧面半量、底面无湿）。WET_SURFACE_GBUFFER
+    // 由 terrain / block 入口定义、hand 不定义——hand 的观察系位置经 gbufferModelViewInverse
+    // 换算无世界语义（手部投影 / 视图矩阵独立），噪声锚定随挥手漂移。
+    // 压平后的法线经八面体打包写入 colortex5：deferred_init 的 shadeSurface 光照与 deferred2 的
+    // 湿滑 SSR（Fresnel / 反射方向 / 命中段雾）自动消费同一法线——无 normal 贴图时 gbufferViewNormal
+    // 本就 = 几何法线、mix 恒等（labPBR 法线贴图资源包才可见压平 = 平坦水坑 / 湿墙的镜面语义）
+    // 露天门先于法线转世界系 / 位置重建；朝下等零门表面也不付两次噪声 fetch。
+    if (rainStrength > 0.0 && vLmcoord.y > WET_SKY_LM_LOW) {
+        vec3 geomNormalW = mat3(gbufferModelViewInverse) * geomNormalView;
+        float wetGate = terrainWetnessSkyGate(vLmcoord.y) * terrainWetnessUpGate(geomNormalW.y);
+        if (wetGate > 0.0) {
+            // 位置换算必须保留逆视图平移，与 deferred2 的噪声锚点一致。
+            vec2 worldXz = viewToRelativeWorld(vViewPos).xz + cameraPosition.xz;
+            float wet = terrainWetnessFromGate(worldXz, wetGate);
+            if (wet > 0.0) viewNormal = normalize(mix(viewNormal, geomNormalView, wet));
+        }
+    }
+#endif
+
     outMaterial = packGbufferMaterial(color, vTexCoord);
     outDetail = packGbufferDetail(viewNormal, vLmcoord); // lmcoord 存原始值
 }

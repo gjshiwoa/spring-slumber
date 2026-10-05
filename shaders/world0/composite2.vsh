@@ -1,6 +1,9 @@
 #version 330 compatibility
+// Convention: entry files stay pure ASCII (comments included), UTF-8 without BOM, LF endings.
+// Legacy OptiFine decodes entries with the JVM default charset (GBK on zh-CN Windows) while include
+// files are ASCII, and LWJGL 2 truncates each char to its low 8 bits; non-ASCII comments can turn
+// into newlines or quotes and break GLSL parsing. Chinese docs go in shared program/lib or AGENTS.md.
+
 #define STAGE_VERTEX
-// TAAU：本 pass quad 缩进与 gbuffers 相同的左下 [0,S]² 渲染子区域（读写均限于子区域内就地进行，
-// composite_taa 随后上采样恢复全屏）；宏须在 fullscreen_vsh 展开前定义（deferred1 入口同款）
 #define FULLSCREEN_RENDER_REGION
 #include "/program/composite_fog.glsl"

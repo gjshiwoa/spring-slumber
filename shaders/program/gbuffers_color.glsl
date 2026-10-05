@@ -1,6 +1,9 @@
 // 手动合成（纯色）: gbuffers_color
 // 非光照纯色几何（选框等，basic 入口复用）在 deferred 之前绘制，
 // 与 gbuffers_color_textured 同理：关闭引擎混合，着色器内手动合成打包进 colortex4.rg
+// 附魔光效曾走本程序常量 tint 加色档（宏 GBUFFERS_COLOR_GLINT / 常量 GLINT_TINT_*——glint
+// 无顶色属性且不采贴图的常量紫光泽，2026-10 两轮反馈后改回 color_textured 贴图路线，
+// git 历史含完整形态）
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"

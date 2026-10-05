@@ -45,8 +45,11 @@ vec3 viewToWorldDirection(vec3 dirView) {
     return mat3(gbufferModelViewInverse) * dirView;
 }
 
-// 观察空间位置 -> 相对世界空间（当帧相机为原点、世界轴向；绝对世界坐标 = 结果 + cameraPosition，
-// 保持相机相对可避开大世界坐标的 float 精度损失）：重投影链第一段（taa.glsl），SSR / SSAO 等共用
+// 观察空间位置 -> 玩家相对世界空间（世界轴向；绝对世界坐标 = 结果 + cameraPosition）。
+// 完整逆视图含平移：旧版原点可在脚部，新版可与实际眼点相差视角晃动；
+// 实际眼点在此空间为 gbufferModelViewInverse[3].xyz，不保证是零点。
+// 位置用于阴影 / TAA 重投影；视向量必须由观察位置仅旋转获得，不能直接归一化本结果。
+// 保持相对坐标可避开大世界坐标的 float 精度损失：SSR / SSAO 等共用
 vec3 viewToRelativeWorld(vec3 viewPos) {
     return (gbufferModelViewInverse * vec4(viewPos, 1.0)).xyz;
 }

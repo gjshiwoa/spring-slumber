@@ -1,3 +1,28 @@
+// 本文件核心（airMass / erfcx / 相位函数族 / energyIntegralRatio / planetHitDistance 等）移植自
+// 下列上游作品，其随代码发布的 MIT 声明原样保留于下（依 MIT 条款：版权与许可声明须随副本保留）：
+//
+// MIT License
+//
+// Copyright (c) 2024 John Payne
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 // 大气物理核心：Chapman 闭式光学深度 + 保能量单次散射 + 各向同性环境场多次散射（零 raymarch）
 // 移植自 Shadertoy WcdSW4（MIT，John Payne 2024）https://www.shadertoy.com/view/WcdSW4 ，五处适配：
 //   1. inf 改 SKY_NO_HIT = 1e30 哨兵（编译期 1/0 在部分驱动上未定义）

@@ -1,6 +1,7 @@
 // 最终输出: final（vsh = 通用全屏 vsh，本 program 无自定义 vsh 段；fsh 按需声明同名 in）
 // 单 pass 收尾全链（BSL / Complementary 同款合并，不占 composite 槽）：读线性主颜色 colortex6
-//（composite_taa 后、未曝光）+ colortex1 tile0 → 线性域合成 bloom（getBloom × BLOOM_STRENGTH）
+//（composite_taa 后、未曝光）+ colortex1 tile0 → 线性域合成 bloom（getBloom × BLOOM_STRENGTH，
+// 水下整体 × BLOOM_UW_STRENGTH_MULT——2026-10 按反馈的水下泛光增益）
 // → 乘 vExposure（composite12 写入槽位，vsh 取一次经 varying 传入）→ RCAS 锐化（春雷移植，
 // 见下）→ AgX → linearToSrgb 输出屏幕。linearToSrgb 是全管线唯一离开线性空间的位置；
 // 原 composite13/14 两全屏 pass 的主颜色读写往返与 colortex7 全屏透传（~46B/px@1080p）由此消除
@@ -49,8 +50,10 @@ in float vExposure; // 本帧自适应曝光（composite12 已写入槽位）
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // bloom 先行取一次（tonemap 前线性域合成；低频场对十字邻域近似恒定，5-tap 共享、泛光不参与锐化）
-    vec3 bloom = getBloom(vTexCoord) * BLOOM_STRENGTH;
+    // bloom 先行取一次（tonemap 前线性域合成；低频场对十字邻域近似恒定，5-tap 共享、泛光不参与锐化）；
+    // 水下整体增益（BLOOM_UW_STRENGTH_MULT，uniform 分支——水下雾介质包住高对比亮部、泛光观感偏弱）
+    float bloomStrength = BLOOM_STRENGTH * (isEyeInWater == 1 ? BLOOM_UW_STRENGTH_MULT : 1.0);
+    vec3 bloom = getBloom(vTexCoord) * bloomStrength;
 
     // 直通链（无 RCAS / 天空像素共用）：中心 tap + bloom + 曝光 = 线性组合域的中心值
     ivec2 pixel = ivec2(gl_FragCoord.xy);

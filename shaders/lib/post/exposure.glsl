@@ -7,9 +7,10 @@
 
 // colortex7 曝光槽位（杂项簇第一个槽）：天空盒与天空 LUT 的 4 texel 间隔 gutter 内、缓冲底边
 //（固定 texel (258, 0)，与两区域任何分辨率下不相交——原「图集 tile 间隔」方案位置随分辨率浮动、
-// 常见分辨率下会落进 LUT 区域故迁址）；写入端 composite12 与读取端共用本函数、位置恒一致
+// 常见分辨率下会落进 LUT 区域故迁址）；槽位常量 EXPOSURE_TEXEL 在 constants.glsl（water vsh 快照
+// 解码不经本文件直读槽位、须共享位置），写入端 composite12 与全部读取端经本函数取值、位置恒一致
 ivec2 exposureTexel() {
-    return ivec2(SKYVIEW_LUT_ORIGIN_X - 2, 0);
+    return EXPOSURE_TEXEL;
 }
 
 // 场景平均亮度（对数平均，春雷同款）：bloom 最粗 tile4（1/64 分辨率低频）上固定 16 点抖动网格核

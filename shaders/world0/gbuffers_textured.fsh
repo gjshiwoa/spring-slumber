@@ -1,7 +1,10 @@
 #version 330 compatibility
+// Convention: entry files stay pure ASCII (comments included), UTF-8 without BOM, LF endings.
+// Legacy OptiFine decodes entries with the JVM default charset (GBK on zh-CN Windows) while include
+// files are ASCII, and LWJGL 2 truncates each char to its low 8 bits; non-ASCII comments can turn
+// into newlines or quotes and break GLSL parsing. Chinese docs go in shared program/lib or AGENTS.md.
+
 #define STAGE_FRAGMENT
-// 手动档（时机两可：OptiFine 位在 deferred 前须关混合整像素写 gbuffer；DRAWBUFFERS 与程序侧
-// 手动档布局一致——程序文件已不带 DRAWBUFFERS、由入口提供）
 #include "/program/gbuffers_translucent_simple.glsl"
 
 /* DRAWBUFFERS:456 */
