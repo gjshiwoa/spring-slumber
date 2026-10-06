@@ -140,7 +140,8 @@ vec3 getSkyColor(vec3 dirView, vec3 sunDirWorld, vec3 moonDirWorld, vec3 horizon
 // ---------- 云层天空盒（八面体，CLOUDS_2D 门控；colortex7 [0,SKYBOX_LUT_SIZE)² 原点 (0,0)） ----------
 
 // 反射路径的烘焙云层（2026-09「反射不硬算云」的替代路线落地，2026-10）：composite12 每 texel
-// 全量 getPlanarCloudsWorld 求值写入（rgb = 预乘散射、a = 透射率），消费端（water 的
+// 全量 getPlanarCloudsWorld 求值写入（rgb = 未预乘云色、a = 不透明度，2026-10 契约——标准
+// alpha 合成 mix(天空, 云色, 不透明度)，云色暗时呈暗剪影），消费端（water 的
 // waterSkyReflection）按反射方向单 fetch。天空本体不进烘焙（sky-view LUT 反射侧直采更清晰、
 // 免八面体重采样），太阳盘不进烘焙（256² 纹素角尺寸 ~0.8° 装不下 ~2.2° 圆盘的解析锐度——
 // 消费侧仍走 getSunDisk，云在其后合成、镜中日盘同被云遮挡）。映射对 = packing.glsl 的
@@ -156,7 +157,7 @@ vec3 cloudSkyboxDir(ivec2 local) {
     return decodeOctahedral(oct);
 }
 
-// 采样端：世界系方向（归一化）→ 天空盒 bilinear fetch，返回 (预乘云散射 rgb, 透射率 a)。
+// 采样端：世界系方向（归一化）→ 天空盒 bilinear fetch，返回 (未预乘云色 rgb, 不透明度 a)。
 // 内容为上帧 composite12 烘焙（滞后一帧与 sky-view LUT 同批）；八面体接缝处 bilinear 会混到
 // 球面上相距甚远的两 texel（低频云不可分辨，gbuffer 八面体法线同款取舍）
 vec4 sampleCloudSkybox(vec3 dirWorld) {

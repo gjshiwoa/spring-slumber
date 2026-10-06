@@ -138,8 +138,10 @@ vec3 waterSkyReflection(vec3 reflDirW, vec3 sunDirWorld, vec3 moonDirWorld,
 #endif
 #ifdef CLOUDS_2D
     if (skyLutValid) {
+        // 标准 alpha 合成（与 deferred_init 天空分支同契约：rgb = 未预乘云色、a = 不透明度，
+        // 2026-10 修复——云色暗时镜中呈暗剪影而非透明）
         vec4 cloud = sampleCloudSkybox(reflDirW);
-        sky = cloud.rgb + sky * cloud.a;
+        sky = mix(sky, cloud.rgb, cloud.a);
     }
 #endif
 #ifdef BOUNDARY_FOG

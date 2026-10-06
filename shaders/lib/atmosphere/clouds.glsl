@@ -11,8 +11,8 @@
 // 设计存档见 plans/平面云方案.md
 //
 // 性能（本包三次优化，相对春v2 原版）：KN 相位的 e 牛顿迭代常量折叠（g 与 e / ln(2e+1) 在
-//   constants.glsl 成对维护，免每云像素 9 次超越函数）；地平线 alpha 上界早退（先验上界不可见
-//   即全免噪声求值）；hash 族换无 sin 浮点 hash（noise.glsl，图案更换统计等价、待实机 A/B）；
+//   constants.glsl 成对维护，免每云像素 9 次超越函数）；hash 族换无 sin 浮点 hash（noise.glsl，
+//   图案更换统计等价、待实机 A/B）；
 //   warp 场 worley → simplex（9 hash → 3，开关宏 CLOUDS_2D_WARP_SIMPLEX、A/B 回退点）；
 //   伪自阴影探针场化——cloudFieldShape / sampleCloudField（colortex1 云形状场槽位，deferred 槽
 //   每帧生成 128²×9 hash、deferred1 同帧消费；云像素探针 9 hash 内联求值 → 2 次 bilinear fetch；
@@ -23,8 +23,11 @@
 // 结构：云壳求交（云下仰视穿出 / 云上俯视云顶 / 行星遮挡统一处理）→ 角坐标（交点 xz ÷ 云壳
 // 半径——数值域有界使 hash 输入坐标有界；远交点在角域自然压缩 = Kappa 距离压缩的解析等价，
 // 地平线不闪）→ warp 微扰 + 6 octave simplex fbm（各 octave 差速演变）→ coverage 重映射 /
-// smoothstep 二次锐化 → alpha = 密度 × 距离衰减 → KN 前向散射相位照明。两个消费方：
-//   deferred_init 天空分支（TAA 之前）逐像素直接求值、预乘合成 cloud.rgb + 天空 × cloud.a；
+//   smoothstep 二次锐化 → 不透明度 = 密度（云存在度遮挡）→ KN 前向散射相位照明。合成契约 =
+//   标准 alpha：最终色 mix(天空, 云色, 不透明度)——云色暗（如晨昏交接带直射黑过渡中）时呈
+//   暗剪影而非透明（2026-10 修复；曾为「预乘散射 + 透射率」且不透明度随 exp 距离衰减溶进地平线，
+//   两效应叠加使交接带云只剩轻微调暗背景的透明纱、观感「没有云」，git 历史含完整形态）。两个
+//   消费方：deferred_init 天空分支（TAA 之前）逐像素直接求值、mix 合成；
 //   composite12 云层天空盒烘焙（getPlanarCloudsWorld，2026-10）逐 texel 全量重算写 colortex7
 //   八面体槽位 [0,256)²、water 反射未命中 SSR 侧经 sky.glsl 的 sampleCloudSkybox 单 fetch 消费
 //   ——「反射不重算云」的烘焙路线，主天空不降档。
@@ -159,8 +162,9 @@ float cloudPhase(float cosTheta) {
 // 分支世界方向单次化）直入，免「世界→视图→世界」往返（getSkyColor / getSkyColorWorld 拆分同款
 // 纪律；原视图壳 getPlanarClouds 随最后一消费方转世界系直入而删，git 历史含完整形态）。帧数据
 //（主光源世界方向 / 直射辐照度 / 云高处透射率 / 天空环境基色）由调用方从 vsh 帧数据 varying
-// 传入；返回：rgb = 散射亮度（预乘合成域：最终 color = cloud.rgb + skyColor × cloud.a）、
-// a = 透射率
+// 传入；返回：rgb = 云自身颜色（未预乘 = lighting × CLOUDS_2D_BRIGHTNESS × CLOUDS_2D_BRIGHTNESS_BASE）、a = 不透明度
+//（云存在度 = 密度直乘 × 远界融边，2026-10 起不含中低仰角距离衰减）——消费端一律标准 alpha
+// 合成：最终 color = mix(skyColor, cloud.rgb, cloud.a)
 vec4 getPlanarCloudsWorld(vec3 dirWorld, vec3 lightDirWorld, vec3 directIrradiance,
                           vec3 cloudTransmittance, vec3 skyAmbient) {
     vec3 dir = dirWorld;
@@ -170,31 +174,32 @@ vec4 getPlanarCloudsWorld(vec3 dirWorld, vec3 lightDirWorld, vec3 directIrradian
     // 行星遮挡（春v2 同款双守卫）：云下相机前向命中地面 → 无云（掠地平线下沿的数学交点在
     // 地球背面）；一般情形地面命中点先于云交点同样无云（云上俯视时地面恒在云后、不触发）
     vec2 earthHit = cloudRaySphere(origin, dir, EARTH_RADIUS);
-    if (origin.y < cloudRadius && earthHit.x > 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+    if (origin.y < cloudRadius && earthHit.x > 0.0) return vec4(0.0, 0.0, 0.0, 0.0);
 
     // 云壳求交：云下取远根（相机在云壳球内、仰视穿出云底）、云上取近根（俯视云顶）——统一处理
     vec2 cloudHit = cloudRaySphere(origin, dir, cloudRadius);
     float lenToCloud = origin.y < cloudRadius ? cloudHit.y : cloudHit.x;
     if (lenToCloud < 0.0 || (earthHit.x > 0.0 && earthHit.x < lenToCloud))
-        return vec4(0.0, 0.0, 0.0, 1.0);
+        return vec4(0.0, 0.0, 0.0, 0.0);
 
     // 角坐标：交点 xz ÷ 云壳半径（世界锚定）。有界数值域使 hash 输入坐标有界；同一除法让
     // 远交点在角域自然压缩——地平线方向噪声频率自动降低、不闪（Kappa 显式距离压缩的解析等价）
     vec2 worldXz = cameraPosition.xz + dir.xz * lenToCloud;
     vec2 p = worldXz / cloudRadius;
 
-    // 距离衰减（exp 尾长收口地平线带）；shape ≤ 1 且雨天衰减 ≤ 1，DENSITY × fade 即不透明度的
-    // 先验上界——上界低于可见阈值（len ≳ 220 km 的地平线带）直接透明天，全部噪声求值与场采样免
-    float fade = exp(-lenToCloud / CLOUDS_2D_FADE_DISTANCE);
-    if (CLOUDS_2D_DENSITY * fade < 1e-4) return vec4(0.0, 0.0, 0.0, 1.0);
-
     // 形状密度：warp 微扰 + fbm + coverage 重映射 / 锐化（cloudShape）；雨天密度衰减在乘子处施加
     float shape = cloudShape(cloudSimplexFbm(cloudWarp(p)));
     float density = shape * CLOUDS_2D_DENSITY * (1.0 - CLOUDS_2D_RAIN_FADE * rainStrength);
-    if (density < 1e-5) return vec4(0.0, 0.0, 0.0, 1.0);
+    if (density < 1e-5) return vec4(0.0, 0.0, 0.0, 0.0);
 
-    // 不透明度 = 密度 × 距离衰减，散射与透射率预乘合成
-    float alpha = clamp(density * fade, 0.0, 1.0);
+    // 不透明度 = 密度（云存在度，2026-10 起不含 exp 距离衰减——旧「密度 × 距离衰减」令中低仰角
+    // 云随距离变薄、地平线带溶成透明天；配合旧预乘合成在晨昏交接带〔直射黑过渡、云色近黑〕只剩
+    // 轻微调暗背景的透明纱 = 「云不可见」实测根因。标准 alpha 合成下云色即所见表色）
+    float opacity = clamp(density, 0.0, 1.0);
+    // 远界融边（对应仰角 ≲ 2° 的地平线带、边界雾满档接管）：保 colortex1 云形状场半窗口不变式
+    //——伪自阴影探针域 ≤ 融边终点 + LIGHT_DRIFT（244 km）< 半窗口 256 km，bilinear 边缘永不
+    // 触达（旧不变式锚在 exp 距离衰减的 ~221 km 早退界上、随衰减移除后改锚此处，见 constants.glsl）
+    opacity *= 1.0 - smoothstep(CLOUDS_2D_FAR_MELT_END - 32000.0, CLOUDS_2D_FAR_MELT_END, lenToCloud);
 
     // 伪自阴影（本包扩展，SEUS 同思路、零 raymarch）：同一低频场朝光源水平方向偏移 LIGHT_DRIFT
     // 米重采样求差——此处比太阳侧邻域稠密 = 朝阳边缘，更亮；反之处于邻域的阴影里，更暗。两端都
@@ -214,8 +219,8 @@ vec4 getPlanarCloudsWorld(vec3 dirWorld, vec3 lightDirWorld, vec3 directIrradian
     float phase = cloudPhase(dot(dir, lightDirWorld));
     vec3 lighting = mix(directIrradiance * cloudTransmittance * phase * shadowMod,
                         skyAmbient, CLOUDS_2D_SKY_MIX);
-    vec3 scattering = lighting * alpha * CLOUDS_2D_BRIGHTNESS;
-    return vec4(scattering, 1.0 - alpha);
+    vec3 cloudColor = lighting * (CLOUDS_2D_BRIGHTNESS * CLOUDS_2D_BRIGHTNESS_BASE);
+    return vec4(cloudColor, opacity);
 }
 
 #endif

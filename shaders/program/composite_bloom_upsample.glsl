@@ -128,7 +128,8 @@ void main() {
     else if (pixel.x < SKYBOX_LUT_SIZE && pixel.y < SKYBOX_LUT_SIZE) {
         // 云层天空盒（八面体，[0,256)² 原点 (0,0)，反射烘焙路线）：每 texel 与主天空同一单真源
         // getPlanarCloudsWorld 全量求值（cloudSkyboxDir 逆映射方向；下行视线行星命中在函数内早退）
-        //——rgb = 预乘散射 / a = 透射率，water 反射未命中 SSR 侧单 fetch 消费
+        //——rgb = 未预乘云色 / a = 不透明度（2026-10 契约：消费端标准 alpha 合成），water 反射
+        // 未命中 SSR 侧单 fetch 消费
         outMisc = getPlanarCloudsWorld(cloudSkyboxDir(pixel), vLightDirection,
                                        vDirectIrradiance, vCloudTransmittance, vSkyAmbient);
     }

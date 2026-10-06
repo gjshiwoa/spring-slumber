@@ -95,16 +95,20 @@ bool waterSsrExitsFarPlane(vec4 cs, vec4 cd, float tEnter, float tExit) {
 
 // 屏域二分精修（春雷 sstRefineHit 同构，4 次）：在 (lo, hi] 内夹逼命中点，保持「面后侧」端点
 //（hi 侧）为返回值；门控与 march 同款（非天空、非手部才算遮挡）。sa / sb 与 march 同域
-//（xy = buffer 像素域、z = NDC）
-float waterSsrRefine(vec3 sa, vec3 sb, float lo, float hi) {
+//（xy = buffer 像素域、z = NDC）。hiDepth = 已采样 hi 端点深度，未知传 -1。
+// 每次 hi 收缩时复用本次 zm；最终 hi 对应深度一并返回，免调用方重复 fetch。
+float waterSsrRefine(vec3 sa, vec3 sb, float lo, float hi, float hiDepth, out float refinedDepth) {
+    refinedDepth = hiDepth;
     for (int j = 0; j < 4; j++) {
         float mid = (lo + hi) * 0.5;
         vec3 spm = mix(sa, sb, mid);
         float zm = waterSsrDepth(spm.xy);
-        if (zm < 1.0 && zm >= TAA_HAND_DEPTH && spm.z > zm)
+        if (zm < 1.0 && zm >= TAA_HAND_DEPTH && spm.z > zm) {
             hi = mid;
-        else
+            refinedDepth = zm;
+        } else {
             lo = mid;
+        }
     }
     return hi;
 }
@@ -129,7 +133,9 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     // 面法线即恒定的离面间隙——竖直流面上沿 up 推只会贴面滑动、不产生离面位移）；波面法线随波场逐
     // 像素摆动 + 随时间动画，起点跟着逐帧漂移 = 反射时域噪点（本不该存在、却要 TAA 收敛）。幅度沿用
     // 春v2 距离自适应档：随距离线性放大（远距深度量化变粗、像素足迹变大）至 ~20 格处饱和
-    vec3 origin = viewPos + mat3(gbufferModelView) * faceNormalW * clamp(distWorld / 60.0, 0.01, 0.33);
+    // 复用推离已有的面法线旋转；自适应角度不再额外乘矩阵。
+    vec3 faceNormalView = mat3(gbufferModelView) * faceNormalW;
+    vec3 origin = viewPos + faceNormalView * clamp(distWorld / 60.0, 0.01, 0.33);
 
     // ---- 视锥裁剪：clip 空间 6 半空间（w ± xyz 三轴），t 沿观察空间射线参数 ----
     vec4 cs = gbufferProjection * vec4(origin, 1.0);
@@ -169,8 +175,8 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     if (aExit <= aEnter) return false;
 
     // ---- 可见段重定基 + 均匀像素步进参数（春雷 traceFullScreen 同式：不限步数走完可见段）。
-    // 步距随视口最短边等比定标（WATER_SSR_SHORT_EDGE_STEPS 单一整体旋钮，1080p → 54 px/步）
-    // ⇒ 可见段长度与步距同随分辨率缩放，最坏步数 ≈ 对角线 ÷ 最短边 × 本值 ≈ 2.3 × 20 ≈ 46
+    // 步距随视口最短边等比定标（WATER_SSR_SHORT_EDGE_STEPS 单一整体旋钮，1080p → 27 px/步）
+    // ⇒ 可见段长度与步距同随分辨率缩放，最坏步数 ≈ 对角线 ÷ 最短边 × 本值 ≈ 2.3 × 40 ≈ 92
     //（TAAU 子区域段更短、再 × RENDER_SCALE），与分辨率无关 ----
     vec3 sa = mix(s0, s1, aEnter);
     vec3 sb = mix(s0, s1, aExit);
@@ -184,6 +190,21 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     float rayPixLen = length(sbPx.xy - saPx.xy);
     if (rayPixLen < 1e-5) return false;
     float pixelsPerStep = min(viewWidth, viewHeight) / WATER_SSR_SHORT_EDGE_STEPS;
+#ifdef WATER_SSR_ADAPTIVE_STRIDE
+    // 入射余弦 = |V·N|：V 来自实际眼点观察位置，N 是推离使用的稳定面法线。
+    // distWorld 由调用方传入 length(viewPos)，复用它免额外 normalize / sqrt。
+    // 一条 ray 内步距固定；低于 LOW 完全保留 40 档，最高仅 ×1.25。
+    // 本段只改变角度步距；短段下限由下方独立开关承载，精修 / 信任度 / 终结规则不变。
+    float incidence = clamp(abs(dot(viewPos, faceNormalView)) / max(distWorld, 1e-5), 0.0, 1.0);
+    float strideWeight = smoothstep(WATER_SSR_STRIDE_ANGLE_LOW, WATER_SSR_STRIDE_ANGLE_HIGH, incidence);
+    pixelsPerStep *= 1.0 + WATER_SSR_STRIDE_MAX_EXTRA * strideWeight;
+#endif
+#ifdef WATER_SSR_SHORT_SEGMENT_SAMPLES
+    // 经裁剪的短屏幕段至少有 3 个相位采样位置，防止整段仅 1~2 点而逐帧漏采。
+    // 必须在角度放粗之后限制步距；长段 min 保留原值，不新增最低世界追踪距离。
+    // 零长 / 退化段已在上方早退；原命中 / 验证失败即终结，不强迫命中后补够 3 次。
+    pixelsPerStep = min(pixelsPerStep, rayPixLen / WATER_SSR_SHORT_SEGMENT_MIN_STEPS);
+#endif
     int stepCount = max(int(ceil(rayPixLen / pixelsPerStep)), 1);
     float stepAlpha = min(pixelsPerStep / rayPixLen, 1.0);
 
@@ -218,9 +239,9 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
             // 相位均匀分布 [0, 步长]）⇒ residual 在 [0, 1/BIAS] 逐帧波动 = 命中 confidence 翻转
             // 的反射噪点根源。代价 = 验证失败的剪影候选也付 4 次 refine fetch（每 march 至多一个
             // 候选、有界）
-            float alphaRefined = waterSsrRefine(saPx, sbPx, lastGood, alpha);
+            float sceneZHit;
+            float alphaRefined = waterSsrRefine(saPx, sbPx, lastGood, alpha, sceneZ, sceneZHit);
             vec3 spHit = mix(saPx, sbPx, alphaRefined);
-            float sceneZHit = waterSsrDepth(spHit.xy);
             // 方向一致性信任（waterSsrDirectionTrust，2026-10）：碰撞表面不在射线路径近旁
             //（剪影 / 深度跳变类伪命中）→ 因子归零 = 不信任，与深度验证相乘联合把关。
             // **首步候选豁免（2026-10「折角天空线」实机修复）**：i == 0 的候选 = 起步即碰撞类
@@ -234,8 +255,11 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
             float candidateConfidence = waterSsrHitConfidence(spHit.z,
                                                               mix(saPx.z, sbPx.z, lastGood),
                                                               mix(saPx.z, sbPx.z, alpha),
-                                                              sceneZHit, projC, projD)
-                                      * (i == 0 ? 1.0 : waterSsrDirectionTrust(origin, dir, spHit.xy, sceneZHit));
+                                                              sceneZHit, projC, projD);
+            // 深度信任度为零时最终必拒收，免碰撞点重建 / normalize / 角度判定。
+            // 首步豁免与原判定保持不变，接受域和置信度不变。
+            if (candidateConfidence > 0.0)
+                candidateConfidence *= (i == 0 ? 1.0 : waterSsrDirectionTrust(origin, dir, spHit.xy, sceneZHit));
             if (candidateConfidence > 0.0) {
                 hitConfidence = candidateConfidence;
                 hitAlpha = alphaRefined;
@@ -254,13 +278,20 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     // 春雷全屏档同语义）、出口像素有不透明几何且在射线前方（验证把关——前景剪影仍拒收）；
     // 与 march 候选同款「先精修后验证」（2026-10 调序，见上注），验证纹素 = 精修交点----
     if (!hit && !aborted && farPlaneExit) {
-        float alphaRefined = waterSsrRefine(saPx, sbPx, lastGood, 1.0);
+        float sceneZ;
+        float alphaRefined = waterSsrRefine(saPx, sbPx, lastGood, 1.0, -1.0, sceneZ);
         vec3 spExit = mix(saPx, sbPx, alphaRefined);
-        float sceneZ = waterSsrDepth(spExit.xy);
-        float candidateConfidence = waterSsrHitConfidence(spExit.z,
-                                                          mix(saPx.z, sbPx.z, lastGood),
-                                                          sbPx.z, sceneZ, projC, projD)
-                                  * waterSsrDirectionTrust(origin, dir, spExit.xy, sceneZ);
+        // 远端 hi 尚未采样；只有四次精修均未更新 hi 时补读，不能复用无效占位。
+        if (sceneZ < 0.0) sceneZ = waterSsrDepth(spExit.xy);
+        float candidateConfidence = 0.0;
+        // 原路径先算信任度再判几何；反过来门控可免天空 / 手部 / 面前候选的验证成本。
+        if (sceneZ < 1.0 && sceneZ >= TAA_HAND_DEPTH && spExit.z >= sceneZ) {
+            candidateConfidence = waterSsrHitConfidence(spExit.z,
+                                                        mix(saPx.z, sbPx.z, lastGood),
+                                                        sbPx.z, sceneZ, projC, projD);
+            if (candidateConfidence > 0.0)
+                candidateConfidence *= waterSsrDirectionTrust(origin, dir, spExit.xy, sceneZ);
+        }
         if (sceneZ < 1.0 && sceneZ >= TAA_HAND_DEPTH && spExit.z >= sceneZ && candidateConfidence > 0.0) {
             hitConfidence = candidateConfidence;
             hitAlpha = alphaRefined;

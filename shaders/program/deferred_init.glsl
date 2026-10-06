@@ -135,11 +135,12 @@ void main() {
         color += getStars(skyDirWorld, vSunDirection, vMoonDirection);
 #endif
 #ifdef CLOUDS_2D
-        // 2D 平面云叠加（预乘合成）：地形像素不进本分支、遮挡天然正确；云不写深度，TAA 按天空
+        // 2D 平面云叠加（标准 alpha 合成：cloud.rgb = 未预乘云色、cloud.a = 不透明度——云色暗时
+        // 呈暗剪影而非透明，2026-10 修复）：地形像素不进本分支、遮挡天然正确；云不写深度，TAA 按天空
         // 路径处理（纯旋转链重投影），TAAU 档与天空同路径上采样
         vec4 cloud = getPlanarCloudsWorld(skyDirWorld, vLightDirection,
                                           vDirectIrradiance, vCloudTransmittance, vSkyAmbient);
-        color = cloud.rgb + color * cloud.a;
+        color = mix(color, cloud.rgb, cloud.a);
 #endif
 #endif // DIM_NO_ATMOSPHERE
     } else {

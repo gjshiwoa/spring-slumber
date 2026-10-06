@@ -1,6 +1,16 @@
 // 全部常量集中声明，程序与其他 lib 文件不再自行定义
 // lib 文件之间不互相 include，本文件由 program 直接引入（须在 lib/common/pipeline/varying_io.glsl 之前，
 // remapLightmap 依赖这里的常量）；OptiFine/Iris 扫描 include 展开后的内容
+//
+// ---- 游戏内设置（2026-10 接入；布局 = shaders.properties 的 screen.* 段、文案 = shaders/lang/*.lang）----
+// 三种形态：①开关 = 裸 #define 行（引擎改设置即注释 / 取消注释该行，删宏回退语义天然成立）；
+// ②数值 = `#define NAME 值 // [值表]`（引擎回写值表中的 token，值表必须是本行的行尾注释、其后不得再有
+// 其他文字——引擎正则只认行尾 [..]，说明文字一律挪到上一行注释）；③游戏内置指令 = camelCase const
+//（shadowMapResolution 系 / sunPathRotation / ambientOcclusionLevel）——**唯一可用 const 形态挂值表的
+// 设置**，自定义数值选项必须用 #define：引擎 const/option 预理会移除 / 改写数值型 const 声明（见下方
+// 缓冲格式分区注），宏则按行回写、结构性免疫。值域换算类 / 结构不变式类常量（LUT 布局、位打包阈值、
+// TAAU_KERNEL_BIAS 的 [4/3,√2) 窗等）不开放——开放项以「玩家观感旋钮」为限。诊断 A/B 档
+//（CLOUDS_2D_WARP_SIMPLEX / WATER_SSR_DIR_TRUST / SKY_CLAMP_TO_HORIZON）不列入设置屏、留在源码手动切换
 #ifndef LIB_CONSTANTS_GLSL
 #define LIB_CONSTANTS_GLSL
 
@@ -10,7 +20,8 @@ const float PI             = TAU * 0.5;
 const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
 const float GOLDEN_RATIO    = 0.61803398875; // 黄金比例共轭 1/φ（春v2 同值）：temporal 噪声帧间相位偏移（noise.glsl）
 const float ALPHA_CUTOUT   = 0.1;           // cutout 透贴裁剪阈值
-const float ambientOcclusionLevel = 1.0;    // 引擎指令：原版平滑光照 AO 强度（缩放引擎烙进顶点色 rgb 的暗角，随 albedo 打包进 colortex4；0 = 关闭）
+// 引擎指令：原版平滑光照 AO 强度（缩放引擎烙进顶点色 rgb 的暗角，随 albedo 打包进 colortex4；0 = 关闭）
+const float ambientOcclusionLevel = 1.0; // [0.0 0.5 1.0]
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
 const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上限 = MIN + SPAN = 31/32）
 
@@ -131,9 +142,11 @@ const float SKY_MS_CAPTURE_MAX   = 0.9; // 截获比 ρ 钳顶（海平面实测
 // LUT 半区 200×100 的纹素角尺寸远大于 ~1° 视角圆盘、装不下，太阳盘只能解析绘制；亮度与
 // 地面直射光同源（SOLAR_IRRADIANCE × 沿视线透射率），日落红化 / 雨天衰减与场景阳光色自动一致。
 // 遮挡 = planetHitDistance（与 LUT 生成端同一行星几何），太阳沉没即圆盘下缘被地平线硬切
-const float SUN_DISK_RADIUS     = 0.0188; // 视角半径（弧度）≈ 1.08°：约 4 倍真实太阳（0.267°），全角 ~2.2°，按反馈连续放大；嫌大回抬此值
+// 视角半径（弧度）≈ 1.08°：约 4 倍真实太阳（0.267°），全角 ~2.2°，按反馈连续放大；嫌大回抬此值
+#define SUN_DISK_RADIUS 0.0188 // [0.0094 0.0141 0.0188 0.0282]
 const float SUN_DISK_SOFTEN     = 0.0015; // 边缘软化宽度（弧度）≈ 0.086°：约一渲染纹素（1080p/70°FOV 一像素 ~0.065°、TAAU S=0.7 渲染纹素 ~0.093°），抗锯齿过渡带交由 TAA 时间累积抹平
-const float SUN_DISK_BRIGHTNESS = 450.0;  // 亮度定标：正午 E ≈ 237 × T ≈ 0.87 × 450 ≈ 9×10⁴ 已越过 RGBA16F 上限、盘心钳至 65504 纯白（AgX 本就滚落成白炽、视觉无损），bloom 泛光与日落红盘（未及钳、随本值线性）是主要观感来源；物理辐射亮度 E·T/Ω 会更高三个量级，故为视觉定标非能量定标；嫌亮 / 嫌暗调此值
+// 亮度定标：正午 E ≈ 237 × T ≈ 0.87 × 450 ≈ 9×10⁴ 已越过 RGBA16F 上限、盘心钳至 65504 纯白（AgX 本就滚落成白炽、视觉无损），bloom 泛光与日落红盘（未及钳、随本值线性）是主要观感来源；物理辐射亮度 E·T/Ω 会更高三个量级，故为视觉定标非能量定标；嫌亮 / 嫌暗调此值
+#define SUN_DISK_BRIGHTNESS 450.0 // [150.0 300.0 450.0 700.0]
 const float SUN_DISK_RAIN_FADE  = 0.75;   // 雨天辐照度衰减（与 vDirectIrradiance 的 (1 − 0.75·rain) 同系数）：阴天太阳随直射光一起淡出（云层遮挡由绘制顺序天然给出）
 
 // ---- 月亮盘 / 星盘（sky.glsl getMoonDisk / getStars，deferred_init 天空分支在太阳盘之后、云合成
@@ -147,7 +160,10 @@ const float SUN_DISK_RAIN_FADE  = 0.75;   // 雨天辐照度衰减（与 vDirect
 // 交给 planetHitDistance 地平线遮挡，太阳盘同款）；雨天随月光同系数淡出
 const float MOON_DISK_RADIUS     = 0.0188; // 视角半径（弧度）≈ 1.08°：与 SUN_DISK_RADIUS 同值（vanilla 日月同视觉大小），独立常量留单独调径
 const float MOON_DISK_SOFTEN     = 0.0015; // 边缘软化宽度（弧度）：与 SUN_DISK_SOFTEN 同值，约一渲染纹素、过渡带交 TAA
-const float MOON_DISK_BRIGHTNESS = 250.0;  // 视觉增益定标：月盘 ≈ 0.118 × 透射率 × 本值 ≈ 线性域 ~25——物理满月辐射亮度比太阳暗 ~9 个数量级（MOON_IRRADIANCE 是为夜景可见的游戏取值），月盘亮度是视觉定标非能量定标（SUN_DISK_BRIGHTNESS 450 同思路）；25 经夜曝光适应（上限 18×）≈ AgX 白亮盘 + 温和 bloom，嫌亮 / 嫌暗调本值
+// 视觉增益定标：月盘 ≈ 0.118 × 透射率 × 本值 ≈ 线性域 ~25——物理满月辐射亮度比太阳暗 ~9 个数量级
+//（MOON_IRRADIANCE 是为夜景可见的游戏取值），月盘亮度是视觉定标非能量定标（SUN_DISK_BRIGHTNESS 450
+// 同思路）；25 经夜曝光适应（上限 18×）≈ AgX 白亮盘 + 温和 bloom，嫌亮 / 嫌暗调本值
+#define MOON_DISK_BRIGHTNESS 250.0 // [125.0 250.0 500.0]
 const float MOON_DISK_RAIN_FADE  = 0.75;   // 雨天衰减：与 SUN_DISK_RAIN_FADE / vDirectIrradiance 同系数
 #endif
 
@@ -159,9 +175,13 @@ const float MOON_DISK_RAIN_FADE  = 0.75;   // 雨天衰减：与 SUN_DISK_RAIN_F
 // 星盘接入）：夜门经 END 分支常开、planetHit 切割剔除（星图覆盖全球虚空）、星点叠在 DIMENSION_SKY_COLOR
 // 之上——星盘实现单真源、主世界档逐位不变
 const float STARS_GRID_SCALE    = 60.0;  // 网格密度（星图坐标 × 本值取整分格）：单元角尺寸 ≈ 1/本值 rad ≈ 0.95°
-const float STARS_DENSITY       = 0.15;  // 占格率（hash 门）：天球 ~4π·N² ≈ 45000 格、半球可见 ≈ 22000 × 本值 ≈ 3300 颗（vanilla 星空 ~1500 颗量级）；抬密调本值
+// 占格率（hash 门）：天球 ~4π·N² ≈ 45000 格、半球可见 ≈ 22000 × 本值 ≈ 3300 颗（vanilla 星空 ~1500 颗量级）；抬密调本值
+#define STARS_DENSITY 0.15 // [0.08 0.15 0.3]
 const float STARS_FALLOFF       = 8.0;   // 点径衰减斜率（× 网格域距离）：星半径 ≈ 1/本值 单元 = 0.125 单元 ≈ 0.12° ≈ 1.3 渲染纹素（TAAU S=0.7 / 1080p）——2026-10 按反馈「星星太大」自 0.25 单元缩半；更小会亚像素闪烁（TAA 吸收一部分），再嫌大抬本值；星点格内偏移已钳 [0.25,0.75]，星形完整不出格
-const float STARS_BRIGHTNESS    = 0.3;   // 星点亮度定标（线性域峰值）：夜空 LUT ~1e-3~1e-2、被月光照亮的夜云 ~0.1 量级——本值使星点经夜曝光适应（上限 18×）后清晰可见、但透过云的预乘合成（star × cloud.a）后与云亮度同量级，云遮星观感成立。首版 1.6 被反馈「星星就好像覆盖了云」（透过薄云仍是白点）降至本档；嫌暗回抬、再现刺穿感回降
+// 星点亮度定标（线性域峰值）：夜空 LUT ~1e-3~1e-2、被月光照亮的夜云 ~0.1 量级——本值使星点经夜曝光适应
+//（上限 18×）后清晰可见、但透过云的预乘合成（star × cloud.a）后与云亮度同量级，云遮星观感成立。首版 1.6
+// 被反馈「星星就好像覆盖了云」（透过薄云仍是白点）降至本档；嫌暗回抬、再现刺穿感回降
+#define STARS_BRIGHTNESS 0.3 // [0.15 0.3 0.6 1.2]
 const float STARS_TWINKLE_SPEED = 2.0;   // 闪烁速度（Hz）
 const float STARS_TWINKLE_DEPTH = 0.5;   // 闪烁深度（亮度摆幅比例，0 = 不闪）
 const float STARS_RAIN_FADE     = 1.0;   // 雨天淡出系数（云层遮星，1 = 雨夜全无星）
@@ -187,9 +207,10 @@ const float STARS_FADE_HIGH     = -0.05; // 夜门上沿：高于此（日落线
 // 已带平方距离比较 + 循环外单次 sqrt 的降耗版）
 #define CLOUDS_2D_WARP_SIMPLEX
 const float CLOUDS_2D_HEIGHT        = 8000.0;  // 云层海拔（米，春v2 同值）：高处大片层云观感 + 角坐标数值域有界；与 vCloudTransmittance 半径共用（同一常量）
-const float CLOUDS_2D_COVERAGE      = 0.55;    // 覆盖率（春v2 0.45、按反馈上调）：coverage 重映射阈值，抬 = 云更多更整片
+// 覆盖率（春v2 0.45、按反馈上调）：coverage 重映射阈值，抬 = 云更多更整片
+#define CLOUDS_2D_COVERAGE 0.55 // [0.35 0.45 0.55 0.65 0.75]
 const float CLOUDS_2D_COVERAGE_RAIN = 0.85;    // 雨天覆盖率（本包适配：春v2 雨天只减密度、阴天感由其体素云层承担，本包无底层故抬 coverage 成阴天）
-const float CLOUDS_2D_DENSITY       = 1.0;     // 密度直乘（春v2 同值）：alpha = 密度 × 距离衰减的不透明度主旋钮
+const float CLOUDS_2D_DENSITY       = 1.0;     // 密度直乘（春v2 同值）：不透明度 = 密度（云存在度遮挡，2026-10 去距离衰减——晨昏交接带云不可见修复，见 clouds.glsl）的主旋钮
 const float CLOUDS_2D_RAIN_FADE     = 0.66;    // 雨天密度衰减（春v2 同值）：阴天变薄云
 const float CLOUDS_2D_SCALE         = 300.0;   // 噪声角域频率（春v2 同值）：一个噪声周期 ≈ 云壳半径 / 300 ≈ 21 km，一团云 ≈ 半周期
 const float CLOUDS_2D_SPEED         = 0.01;    // 噪声域时间速度（春v2 同值）：低频层平移 + 各 octave ×1.1 差速——云在漂移之外持续自演变
@@ -206,14 +227,20 @@ const float CLOUDS_2D_SHADOW_STRENGTH = 0.45;  // 伪自阴影幅度（本包扩
 // clear 前，时序天然自洽（colortex1Clear 无需置 false）；bloom 图集自 composite4 起每帧全量重写、
 // 与场槽位区域互斥（布局由 cloudFieldRect 结构性保证）互不干扰
 const int   CLOUDS_2D_FIELD_RES     = 128;     // 场边长（texel）：128² × 9 hash ≈ 0.15M/帧生成成本
-const float CLOUDS_2D_FIELD_WORLD   = 524288.0; // 窗口边长（米，512 km）：texel 4096 m ≤ 场最高 octave（第 2 个，角频率 750）周期 8.48 km 的一半（Nyquist）；半窗口 256 km > fade 早退界 ~221 km（更远处云已透明、不采样）——bilinear 边缘永不被触达
+const float CLOUDS_2D_FIELD_WORLD   = 524288.0; // 窗口边长（米，512 km）：texel 4096 m ≤ 场最高 octave（第 2 个，角频率 750）周期 8.48 km 的一半（Nyquist）；半窗口 256 km > 云远界 CLOUDS_2D_FAR_MELT_END + LIGHT_DRIFT（240 + 4 km，2026-10 自 fade 早退界 ~221 km 改锚）——伪自阴影探针域恒在窗口内、bilinear 边缘永不被触达
 const int   CLOUDS_2D_FIELD_OCTAVES = 2;       // 场 octave 数：探针 / 云影只需低频明暗，2 octave 是 4 km texel 的 Nyquist 上限（第 3 个 octave 周期 3.4 km 需 ≤1.7 km texel）；frequency / weight / time 序列与 cloudSimplexFbm 严格一致（改动须两处联动）
 const float CLOUDS_2D_SKY_MIX       = 0.2;     // 光照的天空环境占比（春v2 同值；春v2 兼作层合成强度，本包无体素云底层、整层全强度合成，此常量只管光照混合）
-const float CLOUDS_2D_FADE_DISTANCE = 24000.0; // 距离衰减 exp 尾长（米，春v2 同值）：地平线云溶进大气亮带的收口
-const float CLOUDS_2D_BRIGHTNESS    = 1.25;    // 云亮度（春v2 取 3.5 按其 sunColor 量级；本包直射辐照度 ≈ 236、白地形 E/π ≈ 75，取 1.25 → 正午云 ≈ 100~150 略亮于白地形、AgX 滚落；进游戏按观感微调）
+const float CLOUDS_2D_FAR_MELT_END  = 240000.0; // 云远界融边终点（米，本包扩展 2026-10）：不透明度在 [终点−32000, 终点] smoothstep 融到 0——保 colortex1 云形状场半窗口不变式（探针 ≤ 终点 + LIGHT_DRIFT = 244 km < 256 km）；对应仰角 ≲ 2° 的地平线带、边界雾满档接管（BOUNDARY_FOG 关闭时为柔和溶接）。曾为 CLOUDS_2D_FADE_DISTANCE 24000 的 exp 距离衰减（春v2 同值、中低仰角云随距离变薄）——晨昏交接带云不可见实测根因之一，按反馈移除
+// 云亮度：实际 = CLOUDS_2D_BRIGHTNESS（玩家倍率，值表 1.0 缺省）× CLOUDS_2D_BRIGHTNESS_BASE（定标基值）。
+// 基值承载 2026-10 按反馈的定档观感（两轮 1.0 → 0.8 → 0.6）：引擎按玩家保存档回写 #define 行，文件侧宏
+// 默认值不可靠，定标收进引擎不回写的 const——玩家选项 1.0 × 基值 0.6 = 旧 0.6 档亮度。历史定标参考：春v2
+// 3.5 按其 sunColor 量级；本包直射辐照度 ≈ 236、白地形 E/π ≈ 75，旧无基值 1.0 → 正午云与白地形同量级
+#define CLOUDS_2D_BRIGHTNESS 1.0 // [0.6 0.8 1.0 1.25 1.5]
+const float CLOUDS_2D_BRIGHTNESS_BASE = 0.6; // 定标基值（非玩家旋钮，不进值表 / screen）；嫌亮暗只调它，勿动玩家档位
 // 云层天空盒（colortex7 [0,SKYBOX_LUT_SIZE)² 八面体、写读映射对 = sky.glsl 的 cloudSkyboxDir /
 // sampleCloudSkybox）：composite12 帧末逐 texel getPlanarCloudsWorld 全量重算（与主天空同一
-// 单真源，rgb = 预乘散射 / a = 透射率）、water 反射未命中 SSR 侧按反射方向单 fetch 预乘合成
+// 单真源，rgb = 未预乘云色 / a = 不透明度）、water 反射未命中 SSR 侧按反射方向单 fetch 标准
+// alpha 合成（2026-10 契约）
 //——2026-09「反射不硬算云」的烘焙路线落地。已知取舍：云纹角分辨率 ~0.8°/texel（远粗于主天空
 // 逐像素，经水波扰动 + TAA 后可接受）、内容滞后一帧且相机锚定晚一帧（云纹尺度数百米、帧间
 // 相机位移厘米级，不可见）、八面体接缝 bilinear 串色（低频云不可分辨）；天空色 / 太阳盘不进
@@ -281,7 +308,13 @@ const int   AERIAL_LUT_W      = 64;  // 方位分辨率（texel）：aerial 是�
 const int   AERIAL_LUT_H      = 48;  // 天顶分辨率（texel）：方向参数化与 sky-view 互逆组共用（双段 sqrt 向地平线集中），分辨率独立
 const int   AERIAL_LUT_SLICES = 4;   // 距离档数（y 向堆叠）：前 3 档有限等效距离 + 末档 ∞（天空渐近，不变式②）
 const float AERIAL_DIST_SLICES[3] = float[3](1024.0, 4096.0, 16384.0); // 距离档位（等效米）：插值按线性距离权重（inscatter 未饱和段近似线性于 t，log 域 lerp 档间中点有 ~25% 系统性偏差）；**档 0 以下不设起始阈值、向相机线性归零**（短路径 inscatter ∝ t 的线性外推——整段早退跳过会在起始距离环留世界系固定的亮度阶，2026-09 实测可见后移除）；末段向 ∞ 档按 1 − S2/t 收尾（无穷远作线性端点 w 恒 0、直接跳档是档 2 距离环上的不连续）。SCALE = 64/9 下档位映射真距 144 / 576 / 2304 格（far 内到不了档 2、晴天不触末段）
-const float AERIAL_DIST_SCALE = 64.0 / 9.0; // 观感强度主旋钮：等效距离放大倍数（真距 × 本值 = LUT 距离域）——中短距 inscatter ∝ t、缩放即强度（2026-09 两轮反馈自 64 连降至 1/9：64 时 far 端 ~70%+ 过浓、64/3 仍偏浓；1/9 后 144 格 ~2% / 576 格 ~8% / far ~9%，远景边界由边界雾主导）。要中距离就明显可回抬（每 ×2 强度约翻倍）。改它不动档位表（档位是 LUT 的骨头、SCALE 只决定多远落哪档）
+// 观感强度主旋钮：等效距离放大倍数（真距 × 本值 = LUT 距离域）——中短距 inscatter ∝ t、缩放即强度
+//（2026-09 两轮反馈自 64 连降至 64/9：64 时 far 端 ~70%+ 过浓、64/3 仍偏浓；64/9 后 144 格 ~2% / 576 格
+// ~8% / far ~9%，远景边界由边界雾主导）。要中距离就明显可回抬（每 ×2 强度约翻倍）。改它不动档位表
+//（档位是 LUT 的骨头、SCALE 只决定多远落哪档）。默认 7.111111 = 64/9 的十进制精确值（开放游戏内设置：
+// 值表须单 token 可解析浮点，分数式 64.0/9.0 不能进值表——引擎滑杆定位按 float 解析；差 < 2e-5 逐位无感），
+// 值表按 ÷2 / ×2 阶梯给档
+#define AERIAL_DIST_SCALE 7.111111 // [3.556 7.111111 14.222 28.444]
 const float AERIAL_RAIN_BOOST = 2.0;  // 雨天加浓：距离域乘子 (1 + 本值 × rainStrength)——保渐近不变式①（密度域调制禁用）
 const float AERIAL_FOG_START  = 1.0 / 6.0; // 起始距离（×far，2026-09 按反馈接入；2026-10 按反馈自 far/3 拉近至 far/6——中近距看不出来雾）：约 far/6 内无雾——applyAerialPerspective 的**效果域** smoothstep 门（LUT 路径仍无阈值、档 0 以下线性归零见上条），fade 乘在「原表面 vs 雾化结果」的 mix 上；起点系数恒 0 且零斜率（C1）、环内外值同为 0，与首代「早退 = 0 / 环外立刻满档 LUT[S0]」的值阶环不同构，起始距离环结构性不可见；门内像素恒等早退、零 fetch
 const float AERIAL_FOG_END    = 0.70;      // 渐满距离（×far）：此处起 aerial 全强（远端强度与门前逐位相同——SCALE 两轮反馈的调定不受门影响）；与 BOUNDARY_FOG_START 同值的接力锚（aerial 渐满即 boundary 开始融接），独立常量、改动须成对评估
@@ -325,9 +358,12 @@ const float BLOCK_WATER = 8.0; // 水 → shadow pass 焦散透射（春v2 同 I
 // 同一函数、同一世界锚定 → 贴图阴影随几何同步晃；删宏 = 两侧一起停晃、逐位回到静止几何
 #define WAVING_PLANTS
 const float WAVING_RATE             = 1.0;  // 晃动速率（时间轴倍率；春v2 默认档）
-const float WAVING_SHORT_AMPLITUDE  = 1.0;  // 矮草 / 花 / 苗（31 族，仅上顶点、仅水平）幅度倍率
-const float WAVING_TALL_AMPLITUDE   = 0.4;  // 双高植物（10175 仅上顶点 / 11175 全顶点，仅水平）幅度倍率
-const float WAVING_LEAVES_AMPLITUDE = 0.4;  // 树叶 / 藤蔓（18 族全顶点、含竖直）幅度倍率
+// 三族幅度倍率（游戏内设置）：矮草 / 花 / 苗（31 族，仅上顶点、仅水平）
+#define WAVING_SHORT_AMPLITUDE 1.0 // [0.5 1.0 1.5 2.0]
+// 双高植物（10175 仅上顶点 / 11175 全顶点，仅水平）幅度倍率
+#define WAVING_TALL_AMPLITUDE 0.4 // [0.2 0.4 0.8 1.2]
+// 树叶 / 藤蔓（18 族全顶点、含竖直）幅度倍率
+#define WAVING_LEAVES_AMPLITUDE 0.4 // [0.2 0.4 0.8 1.2]
 const float WAVING_NOISE_SCALE      = 1.0;  // 风场噪声尺度倍率（大 = 风团更大、空间相位更平滑）
 const float WAVING_DISTANCE         = 60.0; // 晃动距离上限（格，春v2 同值——远处晃动亚像素化无意义且费顶点）
 const float WAVING_FADE_RANGE       = 10.0; // 距离淡出带宽（本包平滑化；春v2 为硬门——按「距玩家世界距离」
@@ -336,7 +372,8 @@ const mat2 WAVING_GUST_ROT = mat2(0.900447, -0.434966, 0.434966, 0.900447); // �
 const float WAVING_GUST_SPEED = 12.0; // 阵风带平移速度（平移坐标 格/s——快摆幅度 mask 在世界中的推进速度；旋转系 x 经 ×3 拉伸，世界系沿旋转 x 的表观速度 = 值 ÷3。春v2 默认 32，调慢为缓行观感）
 
 // ---- Bloom（lib/post/bloom.glsl，无阈值，整幅 HDR 直接进金字塔）----
-const float BLOOM_STRENGTH = 0.075; // 泛光合成强度（tonemap 前线性域加法）
+// 泛光合成强度（tonemap 前线性域加法）
+#define BLOOM_STRENGTH 0.075 // [0.0 0.04 0.075 0.12 0.18]
 const float BLOOM_UW_STRENGTH_MULT = 10.0; // 水下泛光增益（2026-10 按反馈接入，final 消费）：isEyeInWater == 1 时 BLOOM_STRENGTH 整体乘本值——水下雾把高对比亮部（Snell 窗内的天空 / 日盘、焦散亮网）包进低亮介质、泛光观感偏弱，抬档补介质感。**1.5 → 2.5 → 4.0 三档实机无感**（bloom 是 tonemap 前线性域加法，水下画面无 HDR 峰、金字塔内容为低对比雾色场，+30% 量级的加法经 AgX 压缩后不可辨），10.0 起加法量 ≈ 0.75 × 模糊场、与画面同量级才有可见的乳白介质感；只乘水下、水上逐位不变，1.0 = 无增益，嫌过冲在 4~10 间回调
 const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春雷同值）：总模糊半径由回卷链逐级累积，单级无需大步长（步长 4 会跨步混叠给图集带入网格）
 const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile）
@@ -349,17 +386,26 @@ const float max_ev       = 4.026069;  // AgX log2 窗口上界
 
 // ---- RCAS（lib/common/utils/filters.glsl rcasLobe + final 锐化，春雷同款：FSR1 Robust CAS）----
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离（TAAU 同纪律）
-#define RCAS // 总开关：删本行 = final 的 RCAS 段整体编译剔除（含 depth 与 4 次邻域 fetch）、逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本宏
+// RCAS 总开关（游戏内设置）：删本行 = final 的 RCAS 段整体编译剔除（含 depth 与 4 次邻域 fetch）、
+// 逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本开关
+#define RCAS
 #ifdef RCAS
-const float RCAS_SHARPNESS = 1.0; // 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半（春雷同值 1.0）——TAA / TAAU 时间累积软感的末级补锐；嫌锐度过强抬本值、嫌软降本值；TAAU 重建核由 TAAU_KERNEL_BIAS 控制
-#define RCAS_DENOISE // 噪声抑制（春雷同款默认开）：邻域亮度波动大处压低锐化增益、不放大噪声 / 颗粒；删本行 = 分支编译剔除、回退纯 RCAS
+// 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半（春雷同值 1.0）——TAA / TAAU 时间累积软感的末级补锐；
+// 嫌锐度过强抬本值、嫌软降本值；TAAU 重建核由 TAAU_KERNEL_BIAS 控制
+#define RCAS_SHARPNESS 1.0 // [0.0 0.5 1.0 1.5 2.0]
+// 噪声抑制（春雷同款默认开，游戏内设置）：邻域亮度波动大处压低锐化增益、不放大噪声 / 颗粒；
+// 删本行 = 分支编译剔除、回退纯 RCAS
+#define RCAS_DENOISE
 const float RCAS_SURROGATE_K = 1.0; // lobe 统计的感知域代理曲线锚点（Reinhard x/(x+k)）：按 agx 灰阶三点定标（输入 0.18 / 1 / 10 → agx ≈ 0.16 / 0.55 / ~1.0，k=1 时 surrogate ≈ 0.15 / 0.50 / 0.91，中暗部贴合最紧）——代理只喂限幅 / 去噪统计（lobe 只依赖邻域单调统计量），域差仅轻微影响自适应增益；final 消费
 #endif
 
 // ---- 自动曝光（lib/post/exposure.glsl，亮度算法春雷同值）----
 const float AUTO_EXPOSURE_RATE          = 2.0;     // 适应速度（1/s）：mix 因子 1 - exp(-frameTime * RATE)，帧率无关
 const float AUTO_EXPOSURE_KEY_VALUE      = 0.18;    // 目标亮度（18% 灰 key），targetExposure = KEY / max(avgLum, BASE)
-const float AUTO_EXPOSURE_BASE_LUMINANCE = 0.01;    // 基础亮度地板：avgLum 直除前先抬到此下限，曝光上限 = KEY / 此值 = 18——无地板时深夜对数平均低至 1e-3、曝光冲到 90~720 倍把夜晚拉成白天。亮场景不受影响；嫌夜亮调大本值、嫌夜黑调小（有效旋钮是它，不是 MIN_LUMINANCE）
+// 基础亮度地板：avgLum 直除前先抬到此下限，曝光上限 = KEY / 此值 = 18——无地板时深夜对数平均低至
+// 1e-3、曝光冲到 90~720 倍把夜晚拉成白天。亮场景不受影响；嫌夜亮调大本值、嫌夜黑调小（有效旋钮是它，
+// 不是 MIN_LUMINANCE）
+#define AUTO_EXPOSURE_BASE_LUMINANCE 0.01 // [0.005 0.01 0.02 0.04]
 const float AUTO_EXPOSURE_MIN_LUMINANCE  = 0.00025; // log(0) 防护；曝光上限已由 BASE 收口，本值仅作半精度绝对后备（KEY / 此值 = 720）
 const int EXPOSURE_SAMPLE_COUNT = 16;              // 测光采样数：槽位 fragment 的测光成本与分辨率解耦（全遍历在 4K 下 2000+ fetch）
 // 均匀随机采样核：4×4 抖动网格（每单元一个随机点），全域覆盖、无聚集，读取端映射回 tile4；固定核保证帧间稳定
@@ -434,7 +480,9 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离
 #define TAAU
 #ifdef TAAU
-const float RENDER_SCALE = 0.7; // 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；半抖去抖 + 置信度门控 + 32 相位修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
+// 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；半抖去抖 + 置信度门控 + 32 相位
+// 修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
+#define RENDER_SCALE 0.7 // [0.5 0.6 0.7 0.8 0.9 1.0]
 const float TAAU_KERNEL_BIAS = 1.35; // 3x3 径向支撑：必须在 [4/3,sqrt(2)) 内，换中心时外侧权重为零
 const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档 TAA_BLEND_BASE 同值同调，2026-10 自 0.05 降——远处闪烁 / 反射噪点反馈，见其注释）：当前帧样本是相位噪声的注入端、base 即注入下限——历史权重 0.97，静止细节更依赖时间累积（配合半抖 + 减抖，三重压噪声）；出现拖影 / 收敛慢回抬 0.08~0.12
 #endif
@@ -507,7 +555,8 @@ const float DIRECT_SKYLIGHT_GATE_HIGH = 0.10; // 天光门上沿：≥ 此值直
 //（与漫反射同量级），labPBR 资源包光滑面出太阳耀斑。只在直射确有贡献像素求值（零贡献门控复用，
 // ~40 ALU、无新增采样）；删宏 = 整段编译剔除逐位回退
 #define DIRECT_SPECULAR
-const float DIRECT_SPECULAR_STRENGTH = 1.0;  // 高光总强度（观感旋钮；1.0 = 物理量级——F0 4% 与漫反射同源亮度，0 = 视觉等价关但计算照跑，彻底关闭删上方宏）
+// 高光总强度（观感旋钮；1.0 = 物理量级——F0 4% 与漫反射同源亮度，0 = 视觉等价关但计算照跑，彻底关闭删上方宏）
+#define DIRECT_SPECULAR_STRENGTH 1.0 // [0.5 1.0 1.5]
 const float SPECULAR_ALPHA_MIN       = 0.002; // GGX α 下限：镜面级光滑（r→1）防 D 分母爆炸（春雷 getPbrAlpha 同值）
 
 // ---- 次表面散射（SSS，lib/lighting/lighting.glsl + shadow.glsl，春v2 deferred5 同构）----
@@ -515,16 +564,24 @@ const float SPECULAR_ALPHA_MIN       = 0.002; // GGX α 下限：镜面级光滑
 // 拓宽到背光侧，植被整株近均匀受光、明暗只由阴影贴图区分）与阴影 PCF 软化半径（tap 越出叶片自身
 // 阴影边界使背光薄叶漏光、阴影边变软）；同一强度驱动，两处 _MAX 为档位锚点非独立旋钮。
 // 强度来源 colortex4 标记（gbuffer_data.glsl 的 materialSSSStrength）
-const float VEGETATION_SSS_STRENGTH = 0.5;  // 植被 SSS 强度 [0,1]，唯一调效旋钮（0 = 关闭、退化为 max(ndl, 0)；1 = 全档）
+// 植被 SSS 强度 [0,1]，唯一调效旋钮（0 = 关闭、退化为 max(ndl, 0)；1 = 全档）
+#define VEGETATION_SSS_STRENGTH 0.5 // [0.0 0.25 0.5 0.75 1.0]
 const float SSS_WRAP_MAX            = 2.0;  // 强度 1.0 全档的 wrap 量：ndl = 0 → 2/3、ndl = -0.5 → 0.5（默认 0.5 档再减半——温和背光辉光；春v2 plants 的 20 为近全透光档，故取保守量级）
 const float SSS_SOFT_RADIUS_MAX     = 1.0;  // 强度 1.0 全档的阴影软化半径（texel）——过大会沿墙缘漏光，进游戏按需微调
 
 // ---- 阴影（program/shadow.glsl 写入端 + lib/lighting/shadow.glsl 采样端）----
-// 引擎指令前六条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0 / noiseTextureResolution）由 OptiFine/Iris 扫描
-const int   shadowMapResolution      = 2048;   // 阴影贴图边长（texel）；128m 距离下每米 8 texel，中心区经扭曲再放大约 6.7 倍
-const float shadowDistance           = 128.0;  // 阴影覆盖半径（米）；采样端超出即返回 1 全亮（贴图覆盖外无阴影，lib/lighting/shadow.glsl）
-const float shadowDistanceRenderMul  = 1.0;    // 超出 shadowDistance 的几何不进阴影渲染（省填充率——超距采样本就按全亮）
-const float sunPathRotation          = -30.0;  // 太阳轨迹倾角（度，春雷同值）：正午太阳不过天顶、影子不退化；天空与光照方向自动一致
+// 引擎指令前六条（shadowMapResolution 系 / sunPathRotation / shadowHardwareFiltering0 / noiseTextureResolution）由 OptiFine/Iris 扫描。
+// 其中 shadowMapResolution / shadowDistance / sunPathRotation / ambientOcclusionLevel（通用区）已开放游戏内设置——
+// 游戏内置 camelCase 指令是唯一可挂值表的 const 形态（行尾 [..] 由引擎回写），其余值不开放
+// 阴影贴图边长（texel）；128m 距离下每米 8 texel，中心区经扭曲再放大约 6.7 倍
+const int shadowMapResolution = 2048; // [1024 2048 4096]
+// 阴影覆盖半径（米）；采样端超出即返回 1 全亮（贴图覆盖外无阴影，lib/lighting/shadow.glsl）——SS 追踪的
+// 接管锚点全部按 ×D 表达、随本值自动缩放
+const float shadowDistance = 128.0; // [64.0 96.0 128.0 192.0 256.0]
+// 超出 shadowDistance 的几何不进阴影渲染（省填充率——超距采样本就按全亮）；与 shadowDistance 成对语义、不开放
+const float shadowDistanceRenderMul  = 1.0;
+// 太阳轨迹倾角（度，春雷同值）：正午太阳不过天顶、影子不退化；天空与光照方向自动一致
+const float sunPathRotation = -30.0; // [-40.0 -30.0 -20.0 -10.0 0.0 10.0 20.0 30.0 40.0]
 const bool  shadowHardwareFiltering0 = true;   // 仅 shadowtex0 开硬件深度比较（sampler2DShadow）；shadowtex1 保持 sampler2D 裸深度（仅不透明几何）——彩色阴影遮挡分离与未来 PCSS blocker search 共用的后路（春v2 同布置）
 const int   noiseTextureResolution   = 256;    // 引擎程序化噪声纹理边长（texel），OptiFine 默认档；水焦散波场（lib/lighting/caustics.glsl）唯一消费者。参考：BSL 同参数族取 512（texel 密度翻倍更平滑、采样带宽翻倍），春v2 经 texture.*.noisetex 换自备 128 模糊纹理——本包不引资产、用引擎生成档
 const float SHADOW_DISTORT_FACTOR = 0.85;  // 线性扭曲强度（春v2/BSL/Kappa 同族）：中心 factor = 0.15、纹素密度放大约 6.7 倍，边缘不缩放
@@ -576,7 +633,12 @@ const float CAUSTICS_TILT  = 0.2;  // 采样平面 y 斜置系数（BSL 同值�
 const float CAUSTICS_BASE  = 0.22; // 存储背景（网谷）：读取端 ×BOOST 后 ≈ 0.6×tint
 const float SHADOW_COLOR_WATER_A    = 0.5;  // shadowcolor0.a 水标记值（RGBA8 量化 128/255；非水几何恒写 1.0）
 const float SHADOW_COLOR_WATER_TEST = 0.75; // 读取端水标记判定阈（texelFetch 精确纹素，0.5 与 1.0 的中点）
-const float WATER_CAUSTICS_BOOST    = 2.8;  // 读取端 HDR 重建系数：vis = 存储 rgb × 本值——网谷 ≈ 0.6×tint、波前 ≈ 2.8×tint（直射光水下焦点亮度；春v2 BRI_MIN/MAX 1.0→4.0 档两端折算，低配定位取收敛值）。实机 PCF 盘平均 + TAA 时间累积会再抹平一档。**人眼在水下时整体乘渲染点 lm.y 的 pow2**（焦散水深门，2026-10 按反馈——人在水下时水越深焦散越浅：lm.y = 天光级、水下随水深逐格衰减即水深代理；线性首档经 AgX 后不可辨、pow4 首档水下太黑，pow2 折中；水上恒 1 原观感不变，见 shadow.glsl「焦散水深门」段）
+// 读取端 HDR 重建系数：vis = 存储 rgb × 本值——网谷 ≈ 0.6×tint、波前 ≈ 2.8×tint（直射光水下焦点亮度；
+// 春v2 BRI_MIN/MAX 1.0→4.0 档两端折算，低配定位取收敛值）。实机 PCF 盘平均 + TAA 时间累积会再抹平一档。
+// **人眼在水下时整体乘渲染点 lm.y 的 pow2**（焦散水深门，2026-10 按反馈——人在水下时水越深焦散越浅：
+// lm.y = 天光级、水下随水深逐格衰减即水深代理；线性首档经 AgX 后不可辨、pow4 首档水下太黑，pow2 折中；
+// 水上恒 1 原观感不变，见 shadow.glsl「焦散水深门」段）
+#define WATER_CAUSTICS_BOOST 2.8 // [1.5 2.0 2.8 3.6]
 
 // ---- 屏幕空间追踪阴影（lib/lighting/shadow.glsl screenSpaceShadowVisibility + lighting.glsl 接入，方案见 plans/屏幕空间追踪阴影方案.md）----
 // 沿主光源方向对 depthtex1 世界空间 ray march，一档追踪兼两职：近景补接触细节（normal offset /
@@ -600,7 +662,8 @@ const float SHADOW_SS_EDGE_END       = 0.9;  // 渲染边界淡出终点（×far
 const float SHADOW_SS_NEAR_BOUNDARY  = 0.7;  // 近/远景分界（×D）：近景不 trace SSS（保透光观感）、远景 trace（保接管，树冠在 0.9D 外必须有影）
 const float SHADOW_SS_HANDOVER      = 0.9;  // 接管窗起点（×D）：SSS 渐入终点 = 贴图淡出起点，交接链三锚点（0.7 / 0.9 / 1.0）
 const float SHADOW_SS_GATE          = 0.01; // 贴图可见性门（最大通道）：全影像素不 trace——最便宜的性能门（春v2 早退同款）；D 外贴图恒 1、门自然放行
-const float SHADOW_SS_STRENGTH      = 1.0;  // 整体不透明度（0~1）：接触影 / 接管影轻重的第一调效位
+// 整体不透明度（0~1）：接触影 / 接管影轻重的第一调效位
+#define SHADOW_SS_STRENGTH 1.0 // [0.5 0.75 1.0]
 const float SHADOW_SS_FAR_SCALE     = 1.0;  // D 外整体缩放（春v2 取 0.9 微减弱接管区噪声观感，默认不采纳）
 #endif
 
@@ -627,7 +690,9 @@ const float WATER_UW_SKY_SCALE    = 0.30; // 天空环境项系数——**水下
 const float WATER_FOG_BRIGHTNESS  = 1.0 / 24.0; // 水上雾色亮度总旋钮（2026-09 两轮反馈下调：原档满照雾色正午量级偏亮、实机观感「像自发光」，先 ×1/3 再 ×1/3——累计 1/9；2026-10 两轮续降：1/18 再 ×3/4 至 1/24）：乘在 waterFogLitColor 三项之和（直射 + 天空 + MIN_AMBIENT 地板）上；2026-10 与水下路分离（水下走 WATER_UW_FOG_BRIGHTNESS）；嫌淡按倍率回抬（观感近线性）
 const float WATER_MIST_VISIBILITY = 12.0; // 满雾水深（格，春v2 同值）：水深超过此值背景完全变雾色
 const float WATER_FOG_TRANSMIT    = 0.5;  // 水深吸收斜率（春v2 WATER_FOG_TRANSMIT 同值）：exp(−(1−基色)·深·本值)，红通道衰减快 → 深水偏蓝
-const float WATER_UW_VISIBILITY   = 64.0; // 水下雾满强视距（格，composite_fog 水下分支）：春v2 UNDERWATER_FOG_MIST 50 偏清、按 MC 观感收紧至 24；2026-10 三轮按反馈回抬降浓度——24 → 36 → 48 → 64（中点 12 格遮盖权重 39% → 28% → 22% → 17%，嫌还浓继续抬）
+// 水下雾满强视距（格，composite_fog 水下分支）：春v2 UNDERWATER_FOG_MIST 50 偏清、按 MC 观感收紧至 24；
+// 2026-10 三轮按反馈回抬降浓度——24 → 36 → 48 → 64（中点 12 格遮盖权重 39% → 28% → 22% → 17%，嫌还浓继续抬）
+#define WATER_UW_VISIBILITY 64.0 // [32.0 48.0 64.0 96.0 128.0]
 const float WATER_UW_TRANSMIT     = 0.28; // 水下距离吸收斜率（composite_fog 水下分支；与 WATER_FOG_TRANSMIT 分离独立调；2026-10 随 VISIBILITY 三轮同步下调：0.5 → 0.4 → 0.33 → 0.28）
 const float WATER_UW_FOG_BRIGHTNESS = 1.0 / 9.0; // 水下雾色亮度旋钮（结构同 WATER_FOG_BRIGHTNESS、作用 waterFogLitColor 三项之和；基色两路共用 WATER_FOG_COLOR）：分离时取 2026-09 两轮反馈的收敛值 1/9，水上路的续降不波及水下
 // 水下雾环境光门（2026-10「无光水下雾依然很亮」修复；首版「线性 × 无地板」两轮调参后整形）：
@@ -649,7 +714,9 @@ const float WATER_DIFFUSE_POWER    = 3.0;  // 起伏对比锐度（pow 指数）
 // ---- 波形 / 视差 / 折射 / 反射（WATER_FOG 之外的水面效果常量，gbuffers_translucent 消费）----
 const float WAVE_SPEED            = 1.5;  // 波形时间速度倍率（春v2 默认档）
 const float WAVE_FREQUENCY        = 1.0;  // 世界 xz → 波形域频率（春v2 同值）：特征尺度 ~2.9 格
-const float WAVE_HEIGHT           = 0.2;  // 波幅档位（春v2 同值；type1 以 pow(本值, 1.35) 混入高度 = 法线坡度的实际旋钮）
+// 波幅档位（春v2 同值；type1 以 pow(本值, 1.35) 混入高度 = 法线坡度的实际旋钮；再乘掠视角衰减
+//〔|dot(视线, 水面几何法线)| 线性——见下方注记，俯视全幅、掠视趋平〕）
+#define WAVE_HEIGHT 0.2 // [0.1 0.2 0.4 0.6]
 // 足迹过滤仅法线侧：保留第一 octave，不恢复远距整波幅淡出。
 const float WAVE_FILTER_LOW = 0.35; // 高频 octave 噪声域像素足迹
 const float WAVE_FILTER_HIGH = 0.85;
@@ -658,7 +725,23 @@ const float WAVE_FILTER_NORMAL_MAX = 0.5; // 差分上限（格），避免远�
 const float WATER_SSR_CONFIDENCE_START = 0.65; // 原验证带内最后 35% 连续转天空，不扩大接受域
 const float WAVE_NORMAL_EPS       = 0.05; // 世界差分步长 ε（格，春v2 getWaveNormalDH 同值）：三点高度差分的水平间距
 //（曾有的 WAVE_FADE_START/END 波形距离淡出〔24→64 格到平水面〕已按反馈移除——2026-10 嫌远水太平，
-// 远水按像素足迹过滤第二层高频，保留基础波与平均高度；剩余噪声交 TAA 累积）
+// 远水按像素足迹过滤第二层高频，保留基础波与平均高度；剩余噪声交 TAA 累积。同月二次改版：换成
+// 掠视角衰减——波幅混入系数直接乘 |dot(视线, 水面几何法线)|〔水平水 = sin 仰角；点乘 1 完全粗糙 /
+// 0 完全平坦，无整形窗——首版 smoothstep 窗 WAVE_GRAZE_LOW/HIGH 0.05/0.35 旋即按反馈简化为
+// 裸点乘线性档，git 历史含完整形态〕，shadeWaterSurface 消费：掠视〔波特征被 1/仰角透视放大到
+// 亚像素的闪烁带〕趋平水、俯视全波幅，按视角压平不误杀高处俯视的远水。与 WAVE_FILTER_* 足迹
+// 过滤叠加分工：足迹过滤砍高频 octave（按像素采样密度）、掠视角衰减砍整支波幅（按视角），两者
+// 独立生效。衰减 0 时高度恒 1（平水基准）——法线恒 up、视差 g0 = 0 自然跳过，整支波形消费随
+// 系数一致收敛）
+// 掠视角衰减玩家旋钮（2026-10 接入设置屏）：开关宏 + 嵌套强度（SHADOW_SCREEN_SPACE /
+// SHADOW_SS_STRENGTH 同款形态——父开关关闭即强度自动隐藏、无悬挂）；删 WAVE_GRAZE_FADE 定义 =
+// 衰减整段编译剔除、全视角全波幅（逐位回退）。强度语义：1 = 裸点乘线性（掠视完全平坦，默认档
+// = 接入时行为）、中间值经 mix(1, |dot|, 强度) 内插（0.5 = 掠视水保留一半波幅）；0 档由开关
+// 承担、值表不含 0
+#define WAVE_GRAZE_FADE
+#ifdef WAVE_GRAZE_FADE
+#define WAVE_GRAZE_STRENGTH 1.0 // [0.25 0.5 0.75 1.0]
+#endif
 // 水面「水平面假设」族共用的几何面水平度门（|世界几何法线 · up|，导数法线由 gbuffers_translucent
 // 先于 discard 求好传入），低于本值（陡坡流动水 / 瀑布竖直流面）触发两处跳过：①「未抖动视线 ∩
 // 水平面」的去抖替换——水平面假设在竖直流面上把水面点横向搬离真实几何几格，波形采样无锚定无感、
@@ -677,7 +760,9 @@ const float WAVE_PARALLAX_HEIGHT     = 1.0;  // 视差幅度系数（竖向位�
 const float WAVE_PARALLAX_MAX_SHIFT  = 0.75; // 沿视线位移上限（格）：一阶解 t = 高差 / |视线.y| 在掠射时发散、于此饱和（波形距离淡出移除后远水掠射会进饱和带，位移有界、亚像素尺度不可见），上限兜 SSR 起点 / 水深换算不跑飞
 #endif
 
-const float WATER_REFRACTION_STRENGTH = 0.6; // 折射位移强度（像素域 × 视口高 /(距离 + 0.5)，春v2 WAVE_REFRACTION_INTENSITY 的分辨率无关改写）：波扰动法线 xy 推背景采样位
+// 折射位移强度（像素域 × 视口高 /(距离 + 0.5)，春v2 WAVE_REFRACTION_INTENSITY 的分辨率无关改写）：
+// 波扰动法线 xy 推背景采样位
+#define WATER_REFRACTION_STRENGTH 0.6 // [0.2 0.4 0.6 1.0]
 const float WATER_REFRACTION_MAX  = 0.03; // 折射位移上限（× 视口高像素）：防近距 / 强法线把背景拉穿屏
 // 水面背景快照（colortex4，deferred_init 编码 / water 解码）的编码余量：存储值 = 场景色 × 曝光 ÷ 本值
 //（曝光归一化后场景动态范围 ~1e-3~30，÷16 装进 RGBA16 的 [0,1]——旧「colortex4 场景副本」方案被删的
@@ -709,7 +794,20 @@ const vec3  WATER_UW_REFL_TINT   = vec3(0.75, 0.95, 1.0);
 const float WATER_REFL_SKY_GATE_LOW   = 0.1;  // 重映射下界：低于此天光级的天空回退整支归零
 const float WATER_REFL_SKY_GATE_GAMMA = 2.2;  // 感知域 → 线性域幂（srgbToLinear 同值）
 // SSR = 2D SSPT 屏幕域 march（春雷 sstTrace 移植，机制见 lib/water/ssr.glsl「屏幕空间反射」段）
-const float WATER_SSR_SHORT_EDGE_STEPS = 20.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 视口最短边 ÷ 本值——1080p → 54 px/步（春雷 specular 档 50 同量级）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 46（TAAU 子区域段更短、再 × RENDER_SCALE），与分辨率无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
+// 2026-10-07：步距减半（20 → 40）实测改善反射发虚，保留密度并优化精修重复读取 / 无效验证。
+const float WATER_SSR_SHORT_EDGE_STEPS = 40.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 视口最短边 ÷ 本值——1080p 基准 → 27 px/步（旧 20 档为 54 px/步；角度自适应见下方开关）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 92（TAAU 子区域段更短、再 × RENDER_SCALE），与分辨率无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
+// 角度自适应步距 A/B（2026-10-07）：掠视保持基准，较正视最多放粗 25%。
+// 角度只用调用方的稳定面法线；不依赖动画波面法线，避免步距随波场逐帧摆动。
+// 注释开关只关闭角度自适应；与短段最低采样开关均关闭时回固定 40 档。仅源码诊断，不列设置。
+#define WATER_SSR_ADAPTIVE_STRIDE
+const float WATER_SSR_STRIDE_ANGLE_LOW = 0.45;
+const float WATER_SSR_STRIDE_ANGLE_HIGH = 0.85;
+const float WATER_SSR_STRIDE_MAX_EXTRA = 0.25;
+// 短屏幕段最低采样 A/B（2026-10-07）：最多以段长 / 3 作为步距，长段不变。
+// 减少短段只采 1~2 点的相位漏采；仅增加短段采样预算，命中 / 拒收仍即时终结。
+// 注释本开关 = 回到上一轮仅角度自适应的方案，不影响其他开关。
+#define WATER_SSR_SHORT_SEGMENT_SAMPLES
+const float WATER_SSR_SHORT_SEGMENT_MIN_STEPS = 3.0;
 const float WATER_SSR_HIT_TOLERANCE = 0.1; // 命中验证松弛量（格，waterSsrHitConfidence）：场景视深须落在「交点射线深 ±（整步跨度 × BIAS + 本值）」带内才判真命中（2026-10 调序起验证在精修交点纹素上做、分子与带宽分置，见 ssr.glsl）；春雷原档 0.05，按反馈多轮调参（0.05 → 0.2 → 0.4 → 回落 0.1 折中）——过紧时命中判定在阈值边缘随 dither 相位逐帧翻转，命中取场景色 / miss 取天空色的闪变即反射噪点，抬宽容度使命中稳定、噪点收敛；代价 = 前景剪影拉伸伪命中的接受度变大（嫌边缘拉丝回降）
 const float WATER_SSR_HIT_BIAS = 1.0; // 命中验证步长项倍率：带宽 = 整步跨度（上一步 → 候选步的射线深差）× 本值 + TOLERANCE——2026-10 调序起分子与带宽分置（见 ssr.glsl）：分子 = 精修交点穿透深 ≤ 1/16 步长跨度 ⇒ 真命中 residual ≤ 1/(16·本值) 恒满置信（旧序分子 = 候选过冲随 bayer 相位均匀分布 ⇒ confidence 逐帧翻转的噪点根源），带宽维持整步 = 与旧序同宽容度、剪影拒收阈值不变（曾试收敛区间〔1/16 步长〕作带宽的更严档被否——对掠射打到岸线 / 剪影边缘等深度不连续处的真命中过严）；掠射大步长下步长项主导带宽、倍率使容忍随步长放宽，近段步短仍由固定项主导
 const float WATER_SSR_DIR_MIN_DOT = 0.94; // SSR 命中方向一致性下限（2026-10 接入，cos 域）：dot(起点 → 碰撞点, 步进方向) 低于本值 → 信任因子 smoothstep 归零（waterSsrDirectionTrust，乘进命中 confidence = 因子 0 即验证失败、march 终结走天空回退）——真命中的夹角仅来自深度量化 / 纹素足迹 / refine 残留（~1-5°，重建点必在射线路径近旁），伪命中（剪影 / 深度跳变、表面不在路径上）夹角无界；0.94 ≈ 20° 起步，嫌误拒（掠射极端几何）降到 0.90（≈26°）、嫌伪命中漏过抬到 0.97（≈14°）。**首步候选（i == 0）豁免方向验证**（2026-10「折角天空线」实机修复，见 ssr.glsl march 内注）：起步即碰撞类命中的「起点 → 碰撞点」基线趋零、方位无意义地无界，全置信误杀成沿折角的直线天空色（实机 A/B 确认恒信任后消失）；豁免后仍受深度带验证把关，i ≥ 1 中远途候选方向验证照常
@@ -724,7 +822,8 @@ const float WATER_SSR_DIR_MIN_DOT = 0.94; // SSR 命中方向一致性下限（2
 //（反射方向地平线钳制常量 WATER_REFL_MIN_UP 已按反馈删除，2026-10——反射向量背向顶点法线时改为整支
 // 回退顶点法线（水平面 up）反射方向，见 lib/water/surface.glsl shadeWaterSurface 内「背向回退」段注）
 const float WATER_GLINT_EXP       = 512.0; // 太阳 / 月亮镜面高光锐度（pow 指数）：主导光源方向的波面亮斑
-const float WATER_GLINT_BRIGHTNESS = 1.0; // 高光亮度（× vDirectIrradiance）：峰值 ≈ 直射辐照度量级、经 AgX 滚落成波光
+// 高光亮度（× vDirectIrradiance）：峰值 ≈ 直射辐照度量级、经 AgX 滚落成波光
+#define WATER_GLINT_BRIGHTNESS 1.0 // [0.5 1.0 2.0]
 
 // ---- 雨天地表湿滑（`WET_SURFACE`，2026-10；lib/common/pipeline/wetness.glsl 湿度场 + gbuffers_opaque
 //      湿面法线压平 + program/deferred_ssr〔deferred2 槽〕SSR 混合）----

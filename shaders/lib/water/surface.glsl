@@ -18,6 +18,15 @@
 // 坐标帧间随 jitter 相位跳动（远水被掠射透视放大到远超波特征的量级 = 法线 / 反射方向帧间随机、
 // TAA 收敛不住），故采样点一律换成未抖动像素中心视线与水面平面的交点（竖直流面〔瀑布 / 陡坡
 // 流动水〕按几何面水平度门控跳过，2026-10——见函数内「竖直流面门控」段注）。
+// **掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制；粗糙度 mask 同批取消，见 waves.glsl 头注）**：
+// 波幅混入系数乘掠视衰减系数 = mix(1, |dot(视线, 水面几何法线)|, WAVE_GRAZE_STRENGTH)（水平水 =
+// sin 仰角、裸点乘线性——点乘 1 完全粗糙 / 0 完全平坦；**玩家旋钮**：开关 WAVE_GRAZE_FADE +
+// 强度 WAVE_GRAZE_STRENGTH，删宏 = 恒 1 全视角全波幅逐位回退）：掠视（平视地平线方向的远水：波
+// 特征被 1/仰角透视放大到亚像素 = 闪烁带）趋平水、俯视（正对水面）全波幅；第一代 WAVE_FADE_*
+// 距离淡出不分视角、高处俯视的远水被一并压平（嫌远水太平移除），第二代 smoothstep 窗
+//（WAVE_GRAZE_LOW/HIGH）旋即按反馈简化为裸点乘线性档。系数在
+// 视差 / 法线求值前算好（waveAmp）经参数供全部高度求值——衰减 0 时高度恒 1（平水基准）：法线差分
+// 恒 up、视差 g0 = 0 自然跳过，法线 / 视差 / 水深起伏随系数一致收敛、无残留路径
 // **水面视差（WAVE_PARALLAX）**：沿视线把着色点 march 到高度场隐式面（一阶预测 + 单次割线，
 // 共 2 次高度求值），法线在位移后世界 xz 求值、SSR 起点 / 水深 / 折射守卫随位移后位置换算——
 // 波场有立体感（视差正确的波峰波谷错位）；顶点位移仍为扩展点（本视差只移 shading 点、不动
@@ -46,6 +55,8 @@
 // 依赖由接入的 program 先行 include（lib 文件不嵌套——**同拆四件先行引入**：lib/water/waves.glsl /
 // lib/water/fog.glsl / lib/water/ssr.glsl / lib/water/reflection.glsl，后者又前置 atmosphere 三件
 //〔sky / aerial / fog〕与 lib/water/fog.glsl）；另需 constants.glsl（WAVE_PARALLAX /
+// WAVE_HEIGHT / WAVE_GRAZE_FADE / WAVE_GRAZE_STRENGTH〔波幅档 + 掠视角衰减开关 / 强度——
+// 三者在波形消费链本文件侧，文件头注〕/
 // WATER_DEJIT_MIN_UPNESS / WATER_REFRACTION_* / WATER_DIFFUSE_* / WATER_MIST_VISIBILITY /
 // WATER_FOG 宏分区 / WATER_GLINT_* / WATER_REFL_SKY_GATE_* / WATER_UW_REFL_* /
 // WATER_BG_SNAPSHOT_HEADROOM〔解码系数在 vsh〕 /
@@ -144,21 +155,32 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 假设无意义，且 |视线.y| ≈ 0 使一阶解饱和于 ±MAX_SHIFT——着色点 / SSR 起点沿视线在流面两侧整幅
     // 漂移（0.75 格）；跳过 = 回平几何着色（与去抖跳过同一取舍，水平静水 upness = 1 恒走视差）----
 
-    // 粗糙度 mask 单次求值（waterWaveRoughnessMask 段注的共享锚点）：本像素全部高度求值（视差
-    // ≤ 2 + 法线差分 3）共享同一 mask，锚点 = 视差前 / 去抖后的 worldPos.xz（帧间稳定）
-    float waveMask = waterWaveRoughnessMask(worldPos.xz * WAVE_FREQUENCY);
+    // ---- 掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制，文件头注；粗糙度 mask 同批取消）----
+    // 波幅混入系数 = WAVE_HEIGHT 档的 pow(·, 1.35) × 掠视衰减系数：|dot(视线, 水面几何法线)|
+    //（裸点乘线性映射：1 完全粗糙 / 0 完全平坦）经 WAVE_GRAZE_STRENGTH 的 mix(1, dot, 强度) 内插
+    //——强度 1（默认）= 裸点乘、中间值整体抬底（0.5 = 掠视水保留一半波幅）；删 WAVE_GRAZE_FADE
+    // 宏 = 本段编译剔除、恒 1（全视角全波幅逐位回退）。点乘 0 时高度恒 1（平水基准：法线差分恒
+    // up、下方视差段 g0 = 0 自然跳过，法线 / 视差 / 水深起伏随系数一致收敛）。faceNormalW 已朝
+    // 空气侧定向、abs 兼容水上 / 水下两侧（水平水 = sin 仰角）；竖直流面按面法线取夹角——正对
+    // 瀑布照常起波、侧掠趋平，与重定基 / Fresnel 消费的是同一根法线；视角源自去抖后的 viewPos
+    //（帧间稳定，系数不随 jitter 相位抖动）
+    float grazeFade = 1.0;
+#ifdef WAVE_GRAZE_FADE
+    grazeFade = mix(1.0, abs(dot(viewDirW, faceNormalW)), WAVE_GRAZE_STRENGTH);
+#endif
+    float waveAmp = pow(WAVE_HEIGHT, 1.35) * grazeFade;
 
 #ifdef WAVE_PARALLAX
     if (faceUpness >= WATER_DEJIT_MIN_UPNESS) {
         // g = 采样点 y 相对隐式面的高差（> 0 在面上方）；g0 ≥ 0 恒成立（隐式面 ≤ 几何水面）
-        float g0 = (1.0 - waterWaveHeight(worldPos.xz, waveMask)) * WAVE_PARALLAX_HEIGHT;
+        float g0 = (1.0 - waterWaveHeight(worldPos.xz, waveAmp)) * WAVE_PARALLAX_HEIGHT;
         if (g0 > 0.0) {
             // 一阶交点（假定波高沿视线不变）：|视线.y| → 0 掠射发散为 ±∞、clamp 即饱和
             //（0/0 NaN 由 g0 > 0 门槛挡住）
             float t1 = clamp(g0 / (-viewDirW.y), -WAVE_PARALLAX_MAX_SHIFT, WAVE_PARALLAX_MAX_SHIFT);
             vec3 p1 = worldPos + t1 * viewDirW;
             float g1 = t1 * viewDirW.y
-                     + (1.0 - waterWaveHeight(p1.xz, waveMask)) * WAVE_PARALLAX_HEIGHT;
+                     + (1.0 - waterWaveHeight(p1.xz, waveAmp)) * WAVE_PARALLAX_HEIGHT;
             // 割线精修：(0, g0) 与 (t1, g1) 两点连线的零点；分母趋 0（波高沿视线平行）→ ±∞ 同饱和
             float tShift = clamp(t1 * g0 / (g0 - g1), -WAVE_PARALLAX_MAX_SHIFT, WAVE_PARALLAX_MAX_SHIFT);
             worldPos += tShift * viewDirW;
@@ -174,7 +196,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 扰动（波法线相对 up 的偏差），水平面恒等（up + waveN − up = waveN、逐位回退）、竖直面得「面
     // 法线 ± 波坡度」——下游反射 / Fresnel / 折射扰动 / 雾色起伏 / glint 全部自然消费同一法线
     vec2 worldXz = worldPos.xz;
-    vec3 normalW = normalize(faceNormalW + (waterWaveNormalW(worldXz, waveMask, waveFootprint) - vec3(0.0, 1.0, 0.0)));
+    vec3 normalW = normalize(faceNormalW + (waterWaveNormalW(worldXz, waveAmp, waveFootprint) - vec3(0.0, 1.0, 0.0)));
 
     // ---- 直射可见性门控（2026-10「遮挡处水反高光仍在」修复；最简档 = 单 tap 硬判定）----
     // 桥影 / 楼影 / 山影下的水面不再渲染 glint / 镜中日盘 / 雾色直射分量。**不复用
