@@ -27,11 +27,14 @@
 // implementation/OCIO config file available here:
 //   https://github.com/sobotka/AgX
 
-// AgX tonemap（参考春雷 lib/post/simple_tonemap.glsl，同款 minimal AgX 实现：
-// https://iolite-engine.com/blog_posts/minimal_agx_implementation）
-// 末段 pow 2.2 是「回到线性」（display-referred linear），输出仍为线性；
+// Tonemap 算子族（lib/post/tonemap.glsl）。AgX 为本包原有实现；Filmic / ACES / Hable 三算子
+// 自春雷 lib/post/simple_tonemap.glsl 移植（2026-10，游戏内 TONEMAP 宏切换），上游同源
+//（dmnsgn/glsl-tone-map 谱系、ACES 为 Stephen Hill 拟合、Hable = Uncharted 2 filmic）。
+// 全算子同一输出契约：display-referred linear [0,1]（AgX 末段 pow 2.2 即「回到线性」），
 // 显示前的 gamma 矫正（linearToSrgb）由 final 负责
-// 依赖接入方先行 include lib/common/globals/constants.glsl（AGX_ADDITIVE / min_ev / max_ev）
+// 依赖接入方先行 include lib/common/globals/constants.glsl
+//（TONEMAP / AGX_ADDITIVE / min_ev / max_ev / ACES_ADDITIVE / FILMIC_ADDITIVE /
+//  HABLE_ADDITIVE / HABLE_WHITE_POINT）
 #ifndef LIB_TONEMAP_GLSL
 #define LIB_TONEMAP_GLSL
 
@@ -78,6 +81,79 @@ vec3 agx(vec3 color) {
     color = pow(color, vec3(2.2)); // 回到线性（display-referred linear）
 
     return color;
+}
+
+// ---- 以下三算子自春雷 lib/post/simple_tonemap.glsl 移植（逐式同款，仅改名 Hable = 其 Uncharted2）----
+
+// ACES：Stephen Hill 的 RRT+ODT 多项式拟合（输入线性 HDR，输出 display-referred linear）
+// https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
+const mat3 LINEAR_TO_ACES = mat3(
+    0.59719, 0.07600, 0.02840,
+    0.35458, 0.90834, 0.13383,
+    0.04823, 0.01566, 0.83777
+);
+
+const mat3 ACES_TO_LINEAR = mat3(
+    1.60475, -0.10208, -0.00327,
+    -0.53108, 1.10813, -0.07276,
+    -0.07367, -0.00605, 1.07602
+);
+
+vec3 RrtAndOdtFit(vec3 col) {
+    vec3 a = col * (col + 0.0245786) - 0.000090537;
+    vec3 b = col * (0.983729 * col + 0.4329510) + 0.238081;
+    return a / b;
+}
+
+vec3 ACES(vec3 col) {
+    col *= ACES_ADDITIVE;
+    vec3 aces = LINEAR_TO_ACES * col;
+    aces = RrtAndOdtFit(aces);
+    return ACES_TO_LINEAR * aces;
+}
+
+// Hable（Uncharted 2 filmic，John Hable）：hableCurve 为曲线本体（未归一白位）
+vec3 hableCurve(vec3 x) {
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+// Hable 入口：白位点（HABLE_WHITE_POINT）归一到 1，春雷 Uncharted2 同式
+vec3 Hable(vec3 x) {
+    vec3 curr = hableCurve(x * HABLE_ADDITIVE);
+    vec3 whiteScale = 1.0 / hableCurve(vec3(HABLE_WHITE_POINT));
+    return curr * whiteScale;
+}
+
+// Filmic：有理式 filmic 曲线（负分量入口内钳 0，春雷同式）
+vec3 Filmic(vec3 x) {
+    x *= FILMIC_ADDITIVE;
+    vec3 X = max(vec3(0.0), x);
+    return (X * (6.2 * X + 0.5)) / (X * (6.2 * X + 1.7) + 0.06);
+}
+
+// 统一出口（TONEMAP 宏 = constants.glsl 游戏内选项，引擎回写宏行切换档位）：
+// 0 = agx（默认，逐位回退接入史实）1 = Filmic 2 = ACES 3 = Hable。
+// 入口统一钳非负（调用方色彩滤镜的饱和度 >1 / 对比度 >1 会把低通道压负，四算子均要求非负
+// 输入；春雷 TONEMAP_TYPE(max(hdrColor, 0.0)) 同款守卫）；出口同样钳非负——ACES 拟合在
+// 极小正值处有轻微负过冲（a = x(x+0.0246)−0.0000905 于 x ≲ 0.0036 为负），而 final 的
+// linearToSrgb pow 对负值未定义；agx 分支首尾各有一体 max、无重复求值
+vec3 applyTonemap(vec3 color) {
+    color = max(color, 0.0);
+#if TONEMAP == 1
+    return max(Filmic(color), 0.0);
+#elif TONEMAP == 2
+    return max(ACES(color), 0.0);
+#elif TONEMAP == 3
+    return max(Hable(color), 0.0);
+#else
+    return agx(color);
+#endif
 }
 
 #endif

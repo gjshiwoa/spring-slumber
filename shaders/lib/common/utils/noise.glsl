@@ -106,9 +106,16 @@ float simplex2d(vec2 p) {
 // 由 gbuffer 类 program 的 vsh 与通用全屏 vsh（program/fullscreen_vsh.glsl，其 vJitter 即
 // taaJitterUV 的 vsh 侧一次算好）按需平铺引入
 
-// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 32 相位查表）
+// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 32 相位查表）。
+// SR 超分接管时（SR_UPSCALE，constants.glsl）换用 SR mod 的 SRJitterOffset（mod 生成的相位
+// 序列、渲染分辨率像素域 = 本函数的像素域约定）——下游 applyTAAJitter / applyJitter / vJitter
+// 全链自动跟进；算法不支持 jitter 时该 uniform 恒 0 = 不抖（本包 TAA 已旁路，自抖无解析端）
 vec2 taaJitterSample() {
+#ifdef SR_UPSCALE
+    return SRJitterOffset;
+#else
     return TAA_JITTER_SAMPLES[frameCounter & 31] * TAA_JITTER_SCALE;
+#endif
 }
 
 // 当前帧抖动（uv 域）
@@ -116,12 +123,13 @@ vec2 taaJitterUV() {
     return taaJitterSample() / vec2(viewWidth, viewHeight);
 }
 
-// vsh 注入：clip 空间平移（1 px = 2/res NDC，乘 w 保透视）。TAAU：先缩放进左下 [0,S]² 子区域
-// 再叠 jitter——注意 jitter 在子区域缩放**之后**的 NDC 域注入，NDC→viewport 换算按整块 buffer，
+// vsh 注入：clip 空间平移（1 px = 2/res NDC，乘 w 保透视）。TAAU / SR_UPSCALE：先缩放进左下
+// [0,S]² 子区域再叠 jitter——注意 jitter 在子区域缩放**之后**的 NDC 域注入，NDC→viewport 换算按整块 buffer，
 // 有效位移 = ±0.5 **渲染纹素**（buffer 纹素 = 子区域内渲染纹素，与 S 无关；c13 / Kappa / Photon
-// 三家同语义）。解析端（composite_taa）的去抖补偿须在同一 buffer 纹素域等量施加，见 taa.glsl
+// 三家同语义；SR 接管时 S = SR_RENDER_SCALE_FACTOR、jitter = SRJitterOffset，同一注入式）。
+// 解析端（composite_taa）的去抖补偿须在同一 buffer 纹素域等量施加，见 taa.glsl
 vec4 applyTAAJitter(vec4 clipPos) {
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     clipPos.xy = clipPos.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * clipPos.w;
 #endif
     clipPos.xy += taaJitterSample() * (2.0 / vec2(viewWidth, viewHeight)) * clipPos.w;
@@ -129,13 +137,13 @@ vec4 applyTAAJitter(vec4 clipPos) {
 }
 
 // uv 域补偿对：无抖动全视场 uv <-> buffer uv 互转（几何已 +jitter；屏幕空间追踪阴影 / 未来 SSR /
-// SSAO 等的采样一致性用，春雷同款 + TAAU 补全）。TAAU：几何先缩进左下 [0,S]² 子区域再叠 jitter，
-// buffer uv = 全视场 uv·S + jitter——与 deferred_init 去抖基底 (像素uv − vJitter)/S 严格互逆；
-// 不补 ×S 时补偿随 S 缩水（S=0.5 只剩 1/4）、采样错位 ~0.375 渲染纹素（TAAU 糊/闪同因）。
+// SSAO 等的采样一致性用，春雷同款 + TAAU 补全）。TAAU / SR_UPSCALE：几何先缩进左下 [0,S]² 子区域
+// 再叠 jitter，buffer uv = 全视场 uv·S + jitter——与 deferred_init 去抖基底 (像素uv − vJitter)/S
+// 严格互逆；不补 ×S 时补偿随 S 缩水（S=0.5 只剩 1/4）、采样错位 ~0.375 渲染纹素（TAAU 糊/闪同因）。
 // applyJitter 消费方 = 屏幕空间追踪阴影〔仿射系数探针反解〕+ 水面 SSR〔2D SSPT 端点折叠，
 // 2026-10 起〕；applyInverseJitter 的 jitter 参数版 = 各 pass 位置重建基底（见函数注）
 vec2 applyJitter(vec2 uv) {
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     uv *= RENDER_SCALE;
 #endif
     return uv + taaJitterUV();
@@ -146,8 +154,9 @@ vec2 applyJitter(vec2 uv) {
 // 动态索引 + 除法重算（2026-09 性能纪律，原各 pass 内联手抄本式、2026-10 收敛回本函数）。
 // 消费方：deferred_init / composite_fog 的位置重建基底、lib/water/surface.glsl 的去抖 / 折射 /
 // 命中点换算、lib/post/taa.glsl 的重投影锚点——「buffer uv → 无抖动全视场 uv」全树单真源
+//（SR 接管时 S / jitter 两源均由 SR 供给，本函数域约定不变）
 vec2 applyInverseJitter(vec2 uv, vec2 jitterUv) {
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     return (uv - jitterUv) / RENDER_SCALE;
 #else
     return uv - jitterUv;
@@ -159,7 +168,7 @@ vec2 applyInverseJitter(vec2 uv) {
     return applyInverseJitter(uv, taaJitterUV());
 }
 
-// ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段） ----------------
+// ---------------- TAAU 渲染子区域外片元剔除（仅片段阶段；SR_UPSCALE 复用同一机制、S = SR 比例） ----------------
 // GPU 多边形裁剪按全屏 NDC、不知子区域边界——视锥外近带（NDC xy ∈ [1, 2/S−1]，S=0.75 时
 // [1, 1.67]：缩放式 NDC' = NDC·S + S−1 在裁剪立方 NDC' = 1 处反解的上限；负侧贴齐 −1、无对应带）
 // 几何缩放后落进子区域外、白跑 fsh（正确性由读端钳边免疫，纯性能剔除；kappa / photon / FSR2 同款）。调用纪律：
@@ -168,7 +177,7 @@ vec2 applyInverseJitter(vec2 uv) {
 // 恒 false 零成本。#ifdef STAGE_FRAGMENT 守卫——gl_FragCoord 为片段专属输入而本文件亦被 vsh 编译
 #ifdef STAGE_FRAGMENT
 bool outsideRenderRegion() {
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     vec2 limit = ceil(vec2(viewWidth, viewHeight) * RENDER_SCALE) + 1.0;
     return any(greaterThan(gl_FragCoord.xy, limit)) || any(lessThan(gl_FragCoord.xy, vec2(-1.0)));
 #else

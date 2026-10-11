@@ -3,6 +3,10 @@
 // 彩色吸收 + 满深 mix（lib/water/surface.glsl 的 shadeWaterSurface 水雾段消费本文件 waterFogLitColor）；
 // ②水下视角 = composite_fog 的 applyUnderwaterFog 整屏吸收（isEyeInWater == 1 分支，按 depthtex0
 // 表面距离结算——水面像素的水下观视〔折射 / Fresnel〕已在 gbuffers_water 处理，两路不重复计雾）。
+// 物体入射光的水深代理吸收另在 lighting/ambient.glsl 的 underwaterSurfaceColorScale
+// 按物体 lm.y 结算；本文件保留眼到物体的距离吸收，雾色不重复乘该天光吸收。
+// 2026-10-08 水下雾亮度从 1/9 → 1/15 → 1/18；太阳项也独立调暗。
+// 直接观视与反射命中段共用参数，水上亮度不变；共用基色按反馈略偏绿。
 // 基色两路共用 `WATER_FOG_COLOR`、亮度与天空项系数按路径取常量（水上 WATER_FOG_BRIGHTNESS /
 // WATER_FOG_SKY_SCALE，水下 WATER_UW_FOG_BRIGHTNESS / WATER_UW_SKY_SCALE，2026-10 分离——水下雾
 // 偏白偏灰的调参：白太阳项主导时蓝项占比过低）。
@@ -28,12 +32,11 @@
 
 // 雾色光照（上 / 水下共用单真源）：直射辐照度半去饱调制 + 天空环境 + 兜底地板，乘归一化雾基色，
 // 末乘亮度旋钮（三项之和统一缩放，相对比例不变、昼夜自动跟进）——基色两路共用 WATER_FOG_COLOR，
-// 亮度与天空项系数按路径取常量（水上 WATER_FOG_BRIGHTNESS / WATER_FOG_SKY_SCALE，水下
-// WATER_UW_FOG_BRIGHTNESS / WATER_UW_SKY_SCALE，2026-10 分离——水下雾偏白偏灰的调参：白太阳项
-// 主导时蓝项占比过低；基色曾同期分离、旋即按反馈合并回单值）
-vec3 waterFogLitColor(vec3 fogBase, vec3 directIrradiance, vec3 skyAmbient, float skyScale, float brightness) {
+// 亮度、太阳项与天空项系数由路径传入：水上 WATER_FOG_*，水下 WATER_UW_*。
+// 2026-10-08 水下太阳项独立压暗、雾色不随物体亮度补偿抬升；基色两路仍共用。
+vec3 waterFogLitColor(vec3 fogBase, vec3 directIrradiance, vec3 skyAmbient, float sunScale, float skyScale, float brightness) {
     vec3 sunTint = mix(vec3(rgbToLuma(directIrradiance)), directIrradiance, 0.5);
-    return fogBase * (sunTint * WATER_FOG_SUN_SCALE
+    return fogBase * (sunTint * sunScale
                     + skyAmbient * skyScale
                     + MIN_AMBIENT) * brightness;
 }
@@ -62,7 +65,7 @@ void applyUnderwaterFog(inout vec3 color, vec3 viewPos, bool skyPixel,
     directIrradiance = vec3(0.0); // 无天光维度（下界 / 末地，2026-10）：直射不进水下雾色——入参是未过天光门的原始 vDirectIrradiance（固定时间太阳值），shadeSurface 同纪律剔除
 #endif
     float dist = skyPixel ? 1e6 : length(viewPos); // 天空像素（出水仰视的掠射带）按满雾
-    vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_UW_SKY_SCALE,
+    vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_UW_SUN_SCALE, WATER_UW_SKY_SCALE,
                                    WATER_UW_FOG_BRIGHTNESS)
                 * waterUwEnvLight();
     color *= exp(-(vec3(1.0) - WATER_FOG_COLOR) * dist * WATER_UW_TRANSMIT);

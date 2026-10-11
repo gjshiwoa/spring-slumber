@@ -43,6 +43,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/utils/color.glsl"
 #include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
 #include "/lib/common/utils/noise.glsl"
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/pipeline/gbuffer_data.glsl"
@@ -85,6 +86,10 @@ flat VARYING float vIsWater;       // mc_Entity 水判定 0/1（block.8，与 sh
 layout(location = 0) out vec4 outColor; // colortex6：水 = (折射 + 水雾 + 反射, 1.0)；玻璃等 = (lit, alpha)
 
 void main() {
+    // Precompute material gradients before discard or divergent branches.
+    vec2 duv1 = dFdx(vTexCoord);
+    vec2 duv2 = dFdy(vTexCoord);
+
     // 水面几何面世界法线（vViewPos 屏幕导数 → 世界导数法线；导数先于 discard 集中求好——纪律同
     // gbuffers_opaque，discard 后 quad 内幸存像素导数未定义；方向未定向、由 shadeWaterSurface 朝
     // 空气侧定向）：①波面法线重定基与反射背向回退 / SSR 起点推离的基面——高度场波法线恒朝上，
@@ -123,8 +128,8 @@ void main() {
             // 语义与 translucent_simple 的 before 路径采样同款）；轻量光照后直通 (lit, alpha)、引擎
             // ROP 原子合成（FORWARD_HW_BLEND 同款——同 draw 内重叠半透明片段按提交序正确叠层；手动
             //「fetch 背景 + mix」的读改写在重叠片段间是竞态、逐帧闪烁，玻璃叠玻璃 / 玻璃与水交叠实测）
-            vec4 color = texture(tex, vTexCoord) * vColor;
-            if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
+            vec4 color = sampleMaterialTexture(tex, vTexCoord, duv1, duv2) * vColor;
+            if (color.a < CUTOUT_REF) discard; // cutout 透贴（引擎参考值钳制，constants.glsl 的 CUTOUT_REF）
             vec3 lit = forwardLightmapShade(srgbToLinear(color.rgb), lm, vSkyAmbient);
             outColor = vec4(lit, color.a);
         }

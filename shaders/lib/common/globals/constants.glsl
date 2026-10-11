@@ -19,7 +19,16 @@ const float TAU            = 6.28318530718;
 const float PI             = TAU * 0.5;
 const float GOLDEN_ANGLE    = 2.39996323;   // 黄金角（弧度）：黄金螺旋采样（阴影 PCF 等）
 const float GOLDEN_RATIO    = 0.61803398875; // 黄金比例共轭 1/φ（春v2 同值）：temporal 噪声帧间相位偏移（noise.glsl）
-const float ALPHA_CUTOUT   = 0.1;           // cutout 透贴裁剪阈值
+const float ALPHA_CUTOUT   = 0.1;           // cutout 透贴裁剪阈值（引擎参考值不可用时的下限兜底）
+const float ALPHA_TEST_REF_MAX = 1.0;       // 引擎参考值上限（防异常哨兵：Iris 实体 VERTEX_ALPHA 档参考值为
+                                            // Float.MAX_VALUE 一类值，钳回 1.0 后只裁 a<1 像素而非整 draw 全灭）
+// pass 侧 cutout 剔除的统一阈值（2026-10 全版本统一，BSL 式「properties 关引擎测试 + pass 消费
+// alphaTestRef」）：引擎 uniform 钳到 [ALPHA_CUTOUT, ALPHA_TEST_REF_MAX]。两端兜底依据——Iris 在
+// alphaTest.* = off 下 effective 测试 = ALWAYS、alphaTestRef 恒 0（override 取 ALWAYS 的 reference），
+// 老 OptiFine（1.12-）不识别该 uniform 亦恒 0：均由下限回落 0.1 = 统一前行为；现代 OptiFine 的逐 draw
+// 参考值（0.1 / cutout 0.5）原样生效 = 引擎语义。宏体引用 uniforms.glsl 的 alphaTestRef 声明（宏延迟
+// 展开，各 program 的 constants 先于 uniforms 引入即满足）；shadow 阶段不消费本宏、恒 ALPHA_CUTOUT
+#define CUTOUT_REF (clamp(alphaTestRef, ALPHA_CUTOUT, ALPHA_TEST_REF_MAX))
 // 引擎指令：原版平滑光照 AO 强度（缩放引擎烙进顶点色 rgb 的暗角，随 albedo 打包进 colortex4；0 = 关闭）
 const float ambientOcclusionLevel = 1.0; // [0.0 0.5 1.0]
 const float LIGHTMAP_MIN   = 1.0 / 32.0;    // 原版光照图坐标下限
@@ -39,6 +48,7 @@ const int colortex4Format = RGBA16;  // gbuffer: 打包 albedo + 打包高光贴
 const int colortex5Format = RGBA16;  // gbuffer: 八面体观察空间法线 + 原始 lmcoord
 const int colortex6Format = RGBA16F; // 场景主颜色：放 colortex6（= gbuffers 别名 gaux3）而非惯例的 colortex0——前向半透明 after 路径的手动合成须在 gbuffers 阶段采样主颜色背景，而 colortex0~3 采样单元在该阶段被游戏纹理占用（colortex0 即几何纹理 tex、实测采样返回图集内容），colortex0 全程未使用、不声明格式。须浮点格式：半透明合成背景为线性 HDR，旧「colortex4 副本」方案受 gbuffer 位打包的 RGBA16 格式约束会 [0,1] 截断亮背景（阳光下水面背景偏暗），副本机制已删
 const int colortex7Format = RGBA16F; // 杂项数据（左下角杂项簇，布局见 SKYBOX_LUT_SIZE / SKYVIEW_LUT_* / AERIAL_LUT_ORIGIN_X）：云层天空盒 256×256（八面体，反射路径烘焙云）+ 天空 view LUT 200×200（日 / 月半区各 200×100）+ 曝光槽位 1 texel + aerial 透视 LUT 64×192（(460,0) 起）
+const int colortex31Format = RGBA16F; // SR 超分运动矢量（SR mod 注入宏门控引用、未装 SR 时零引用零分配）：rg = 本帧→上帧位移（渲染分辨率归一 uv 域、无抖动采样位）、b = 实体层标记（gbuffers_entities 写 1，deferred_init 读回保留 / 其余写 0）。浮点格式（位移 ∈ [-1,1] 带符号、8bit 量化不可用）；默认 clear = true（帧头清 0 = 标记复位，防上帧实体标记跨帧残留）
 */
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const bool colortex7Clear = false;   // 槽位内容跨帧存活；composite12 唯一写入、光栅区域整写并透传非槽位像素（协议见 AGENTS.md / exposure.glsl）
@@ -379,10 +389,32 @@ const float BLOOM_BLUR_STEP = 2.0; // 下采样 tap 步长（源纹素数，春�
 const float BLOOM_WEIGHTS[5] = float[5](1.0, 0.75, 0.55, 0.40, 0.30); // 各级权重（tile0 最锐 → tile4 最宽），上采样回卷相加时施加（bloomUpsampleTile）
 const float BLOOM_WEIGHT_SUM = 3.0; // ΣBLOOM_WEIGHTS；getBloom 归一化，修改权重时同步更新
 
-// ---- Tonemap（lib/post/tonemap.glsl，AgX，春雷同值）----
-const float AGX_ADDITIVE = 0.6;       // AgX 曲线预缩放（与曝光系数各司其职：曝光在 tonemap 前整体乘）
+// ---- Tonemap（lib/post/tonemap.glsl；算子族自春雷 lib/post/simple_tonemap.glsl 移植）----
+// 算子选择（游戏内设置，2026-10）：0 = AgX（默认，接入史实与现状逐位一致）1 = Filmic 2 = ACES
+// 3 = Hable（= Uncharted 2 filmic，John Hable）。分派在 tonemap.glsl 的 applyTonemap（#if 编译
+// 期裁剪、单算子进产物），其余管线（曝光 / RCAS / bloom / linearToSrgb）不动。类目录形数值选项
+// 不进 sliders——按钮形态逐档点名，滑杆的连续量语义不适用（本包数值选项全进 sliders 纪律的唯一
+// 例外）。已知取舍：RCAS_SURROGATE_K 的代理曲线按 agx 灰阶定标，其他算子下 lobe 统计为近似
+//（lobe 只依赖邻域单调统计量，代理域差仅轻微影响自适应增益）；调参史：三算子 ADDITIVE 预缩放
+// 取春雷同值（其按自身曝光链定标，本包曝光链同源量级）
+#define TONEMAP 0 // [0 1 2 3]
+const float AGX_ADDITIVE = 0.6;       // AgX 曲线预缩放（与曝光系数各司其职：曝光在 tonemap 前整体乘；春雷同值）
 const float min_ev       = -12.47393; // AgX log2 窗口下界
 const float max_ev       = 4.026069;  // AgX log2 窗口上界
+const float ACES_ADDITIVE    = 1.25;  // ACES 曲线预缩放（春雷同值）
+const float FILMIC_ADDITIVE  = 0.2;   // Filmic 曲线预缩放（春雷同值）
+const float HABLE_ADDITIVE   = 2.0;   // Hable 曲线预缩放（春雷 UNCHARTED2_ADDITIVE 同值）
+const float HABLE_WHITE_POINT = 16.29; // Hable 白位点（whiteScale 归一，春雷同值）
+
+// ---- 色彩滤镜（final，tonemap 前线性域：亮度增益 → 对比度 → 饱和度；2026-10 接入）----
+// 施加点在曝光之后（自动曝光测光在 composite12、观感旋钮不被曝光反噬）、RCAS 之后（锐化统计
+// 不吃滤镜），三值 1.0 = 逐位直通。饱和度向 Rec.709 luma 收放（weather 降饱和同式，>1 时低通道
+// 负过冲由 applyTonemap 入口钳非负）；对比度绕线性域 18% 中灰枢轴（不挪自动曝光锚定的中间调，
+// >1 时暗端同样经入口钳）。亮度是纯线性增益、与自动曝光量级解耦（曝光乘在滤镜之前）
+#define COLOR_BRIGHTNESS 1.0 // [0.6 0.8 0.9 1.0 1.1 1.2 1.4]
+#define COLOR_CONTRAST   1.0 // [0.6 0.8 0.9 1.0 1.1 1.2 1.4]
+#define COLOR_SATURATION 1.0 // [0.0 0.4 0.6 0.8 1.0 1.2 1.4 1.6]
+const float COLOR_CONTRAST_PIVOT = 0.18; // 对比度枢轴 = 线性域中灰（18%），不进设置
 
 // ---- RCAS（lib/common/utils/filters.glsl rcasLobe + final 锐化，春雷同款：FSR1 Robust CAS）----
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离（TAAU 同纪律）
@@ -390,9 +422,10 @@ const float max_ev       = 4.026069;  // AgX log2 窗口上界
 // 逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本开关
 #define RCAS
 #ifdef RCAS
-// 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半（春雷同值 1.0）——TAA / TAAU 时间累积软感的末级补锐；
+// 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半——TAA / TAAU 时间累积软感的末级补锐；
+// 2026-10-11：按模糊反馈，默认由 1.0 降至 0.5（lobe 强度 ×sqrt(2)）；不提高历史采样锐度。
 // 嫌锐度过强抬本值、嫌软降本值；TAAU 重建核由 TAAU_KERNEL_BIAS 控制
-#define RCAS_SHARPNESS 1.0 // [0.0 0.5 1.0 1.5 2.0]
+#define RCAS_SHARPNESS 0.5 // [0.0 0.5 1.0 1.5 2.0]
 // 噪声抑制（春雷同款默认开，游戏内设置）：邻域亮度波动大处压低锐化增益、不放大噪声 / 颗粒；
 // 删本行 = 分支编译剔除、回退纯 RCAS
 #define RCAS_DENOISE
@@ -417,7 +450,20 @@ const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
 );
 
 // ---- TAA（lib/common/utils/noise.glsl + lib/post/taa.glsl）----
+// 内置 TAA / TAAU 常量混合基线（2026-10-11）：有效历史固定注入 3% 当前帧。
+// 深度仅供重投影 / 诊断，不调权也不改变颜色钳制；越界 / 首帧仍直接当前帧。
+// 删除本宏恢复旧自适应档（速度 / 深度 / 相位 / Karis / 手部下限），便于实机 A/B。
+#define TAA_FIXED_BLEND
+
+// TAA 诊断 A/B 档：源码手动改值，不列入游戏菜单；SR 接管时自动旁路。
+// 0 = 正常；1 = 深度置信（红拒绝 / 绿接受）；2 = 最终当前帧权重（白 = 1）；
+// 3 = 历史钳制改变量（Reinhard-YCoCg 域 × TAA_DEBUG_CLIP_GAIN）。
+// 诊断标量写 colortex6 闲置 alpha；RGB / 历史 / 测光保持正常，final 绕过后处理显示。
+#define TAA_DEBUG_VIEW 0 // [0 1 2 3]
+const float TAA_DEBUG_CLIP_GAIN = 16.0;
+
 // TAAU 轻量重建与历史修正（2026-10）：不新增元数据缓冲。
+// 下列速度 / 深度 / Karis 参数在 TAA_FIXED_BLEND 下仅为旧自适应回退或诊断保留。
 const ivec2 taaCrossOffsets[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
 const float TAA_MOTION_LOW = 0.5; // 目标像素 / 帧；低速不启用偏心拒绝
 const float TAA_MOTION_HIGH = 8.0;
@@ -460,6 +506,7 @@ const float TAA_HISTORY_SHARPNESS   = 0.65; // 历史 Catmull-Rom 锐化系数�
 const float TAA_CLIP_GAMMA          = 2.0;  // 方差钳制 γ 基础值（深度置信度高时用）：拉宽 μ±γσ 盒 = 提高历史通过率、少被截向当前邻域（输出更贴稳定的历史）；与样本极值盒交配合有天然上界——γ 放宽到超出双峰 σ 后 binding 侧落到极值盒、历史最多放宽到邻域真实样本，鬼影风险不随 γ 无限增长。自 1.75 抬（2026-10 远处物体闪烁 / 反射噪点反馈）：远物邻域统计双峰 σ 窄、历史被截即 Karis 失效（clipDistance=0 不再压注入）→ 恒定注入闪烁，抬 γ 让历史更常稳居盒内、Karis 防闪随之激活（双重收益）
 const float TAA_CLIP_DISTANCE_GAIN  = 5.0;  // Karis 距离防闪增益（Kappa / Photon 同式同值）：历史稳居钳制盒内时把当前帧权重压向 0——恒定注入相位漂移的当前帧样本是静止细节闪烁的主源；工作域已含曝光归一化，距离不再乘曝光
 const float TAA_OFFCENTER_REJECTION = 0.15; // 偏心拒绝强度（Zombye，Kappa / Photon / c13 同族取 0.25）：重投影落点偏离纹素中心（=有运动）时按比例抬高当前帧权重，削运动拖影 / 运动糊；自 0.25 下调——运动中的逐像素抬权幅度即逐像素注入方差，是移动 shimmer 的放大器，下调换边缘稳定（代价同 TAA_BLEND_MOTION）
+// TAA_FIXED_BLEND 下为有效历史的固定当前帧权重；旧自适应档含后续调制。
 const float TAA_BLEND_BASE          = 0.03; // 当前帧基础权重（历史权重 0.97；原生档专用，TAAU 见 TAAU_BLEND_BASE）。自 0.05 降（2026-10 远处物体闪烁 / 反射噪点反馈）：base 是静止区被截历史（Karis 失效）时的恒定注入下限，远处高频细节每帧注入的相位噪声即闪烁残余，降注入拉长时间累积窗换稳态；代价 = 运动后 / 解遮挡后收敛变慢（运动侧由 MOTION / DISOCCCLUSION 项单独补偿、不受影响），嫌拖影回抬
 const float TAA_BLEND_MOTION        = 0.012; // 每像素速度的当前帧权重增量（运动收敛）；自 0.02 下调——移动时锯齿 / 抖动反馈：运动中当前帧注入越少、时间累积窗越长、边缘越稳；代价是无逐物体速度的动态实体拖影收敛变慢（方差钳制兜底），嫌拖影回抬
 const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 独立解遮挡更新下限系数；完全失配时强制当前帧 1.0
@@ -474,17 +521,47 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 // 机制 = c13 / Bliss 子区域缩放 + Photon / Kappa「TAA pass 即上采样器」（全貌见 AGENTS.md）：
 // 几何渲染进左下 [0,S]² 子区域、像素成本 ×S²，composite_taa 上采样恢复全屏——bloom 链及之后零适配。
 // jitter 有效幅度恒为 ±0.5 渲染纹素（注入在子区域缩放之后的 NDC 域，c13 / Kappa / Photon 三家同语义），
-// 解析端在 buffer 域做半抖去抖（补偿加在 uv·S 之后等量施加；c13 / Kappa / Photon 三家一致——全额去抖
-// 每帧精确对齐的样本携带完整相位噪声，半抖把帧间相位变化减半、保留的半个相位差经时间累积解析成
-// AA / 超分信息）。
+// 解析端在 buffer 域完整补偿 jitter（uv·S + jitterUV），与光栅注入互逆。颜色重建与深度搜索
+// 共用该源位置；选出的深度锚点再完整去抖还原到无抖动视场，不以半补偿掩盖坐标错位。
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离
 #define TAAU
 #ifdef TAAU
-// 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；半抖去抖 + 置信度门控 + 32 相位
+// 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；完整补抖 + 置信度门控 + 32 相位
 // 修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
 #define RENDER_SCALE 0.7 // [0.5 0.6 0.7 0.8 0.9 1.0]
 const float TAAU_KERNEL_BIAS = 1.35; // 3x3 径向支撑：必须在 [4/3,sqrt(2)) 内，换中心时外侧权重为零
-const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档 TAA_BLEND_BASE 同值同调，2026-10 自 0.05 降——远处闪烁 / 反射噪点反馈，见其注释）：当前帧样本是相位噪声的注入端、base 即注入下限——历史权重 0.97，静止细节更依赖时间累积（配合半抖 + 减抖，三重压噪声）；出现拖影 / 收敛慢回抬 0.08~0.12
+// TAA_FIXED_BLEND 下直接采用本值，不再受相位 / 深度 / 速度 / Karis 调制。
+const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档 TAA_BLEND_BASE 同值同调，2026-10 自 0.05 降——远处闪烁 / 反射噪点反馈，见其注释）：当前帧样本是相位噪声的注入端、base 即注入下限——历史权重 0.97，静止细节更依赖时间累积（配合相位置信度与历史防闪）；出现拖影 / 收敛慢回抬 0.08~0.12
+#endif
+
+// ---- SR 超分模组接管（配置 = shaders/superresolution.v3.json，Schema V3；接口文档
+//      sr.187j3x1-114514.org——仅 Iris + SR mod + 配置有效时注入下列宏，未装 / 用户关闭 = 全部未定义）----
+// SR_UPSCALE 为本包侧总门（一切 SR 专属代码的唯一开关；删除接入时回收本段 + superresolution.v3.json）。
+// 接管三件事：
+//   ① 渲染比例：RENDER_SCALE 重定义为 SR 的 SR_RENDER_SCALE_FACTOR（编译期宏，比例档切换触发
+//      热重载；「无手抖动档位不更新」的 SR_SCALED_WIDTH 族禁止进 shaders.properties / 代码）。
+//      TAAU 的子区域机制（applyTAAJitter 缩放 / outsideRenderRegion / FULLSCREEN_RENDER_REGION /
+//      final 深度映射 / SSR 域界）门控由 #ifdef TAAU 放行为「TAAU || SR_UPSCALE」——TAAU 关闭 +
+//      SR 开启时子区域机制照常工作；游戏内 RENDER_SCALE 选项在 SR 生效期间被覆盖（改档无效，调 SR 侧）
+//   ② jitter：noise.glsl 的 taaJitterSample 换用 SRJitterOffset uniform（mod 生成的相位序列，
+//      与 Halton 表同一「渲染分辨率像素域」约定，applyTAAJitter / vJitter 全链自动跟进）。算法不
+//      支持 jitter 时该 uniform = 0 = 不抖（此时本包 TAA 已旁路、自抖无解析端，宁可不抖）
+//   ③ 抗锯齿 / 上采样：SR 算法族（FSR2 / DLSS / XeSS…）自带时域累积，composite_taa（composite3）
+//      整 pass 透传旁路（colortex3 历史停写）；SR 在 composite3 前触发点读 colortex6（雾后线性
+//      HDR）+ noTranslucentDepthtex + colortex31 运动矢量、写回全屏 upscaled 色彩
+// 运动矢量（写入端见 deferred_init / gbuffers_opaque_entities，取值实现 space.glsl 的
+//   srSceneMotionVector / srEntityMotionVector）：colortex31 由 deferred_init（三维度共用的
+//   deferred1 入口）写「相机重投影」底层 + gbuffers_entities 的 at_velocity 实体层（b 标记读回
+//   保留）；用户关闭 SR 的 Iris at_velocity 扩展时 SR_ENTITY_VELOCITY 不定义、实体走相机 MV
+#if defined(SR_INSTALLED) && defined(SR_SHOULD_APPLY_SCALE) && SR_SHOULD_APPLY_SCALE == 1
+#define SR_UPSCALE
+#ifdef RENDER_SCALE
+#undef RENDER_SCALE
+#endif
+#define RENDER_SCALE SR_RENDER_SCALE_FACTOR
+#endif
+#if defined(SR_UPSCALE) && defined(SR_IRIS_EXT_VELOCITY) && SR_IRIS_EXT_VELOCITY == 1
+#define SR_ENTITY_VELOCITY
 #endif
 
 // ---- 光照（lib/lighting/lighting.glsl，直接光物理化——春雷 shading.glsl 同构）----
@@ -625,20 +702,21 @@ const float SHADOW_BIAS_DEPTH     = 0.00005;// 压缩后深度域常数 bias（�
 const float CAUSTICS_SCALE = 0.006; // 缩放：世界块 → noisetex uv。texel ≈ 0.65 块（春v2 CAUSTICS_FREQ 0.03 × 128³ 噪声的等效密度折算到 256 noisetex 为 0.015 / texel 0.26 块；2026-10 按反馈两轮调稀：×2/3 至 0.010 仍嫌密、再至 0.006——累计放大 2.5 倍）；网嫌大嫌密调本值——**改本值须同比缩 CAUSTICS_DRIFT（噪声域速度），否则世界系滚动速度随密度联动**
 const mat2  CAUSTICS_ROT   = mat2(0.900447, 0.434966, -0.434966, 0.900447); // 旋转（列主序，与春v2 rotate2D(xz, -0.45) 逐位一致：其矩阵形 [[c,-s],[s,c]] 配负角净效果 = 逆时针 0.45 rad）；三角值预算、编译期折叠免运行时 sincos。**改本矩阵的转角方向会连带翻转水流轴向（与 DRIFT 符号共同决定世界系流向），与春v2 对齐时勿只改角度不改符号**
 const float CAUSTICS_SQUASH = 4.0; // 压扁：噪声 y 向频率 ×4 → 波纹沿旋转后 x 拉长成条带状涟漪（春v2 z×4 同值）；条带拉长比主旋钮
-const vec2  CAUSTICS_DRIFT = vec2(0.0, 0.026); // 时间平移速度（uv/秒，沿旋转系压扁轴；caustics.glsl 侧 -= 与春v2 `sampleUV -=` 同号——图案沿压扁轴正向滚动）：世界速度 = 本值 / CAUSTICS_SCALE ≈ 4.3 块/秒（春v2 CAUSTICS_SPEED 0.13 折算）——2026-10 两轮调稀密度时同比缩放（0.065 → 0.0433 → 0.026）保持世界流速不变
-const float CAUSTICS_EVOLVE = 0.6;  // 三维噪声 z 维演化速度（lattice 格/秒，2026-10 焦散 3D 化接入）：z 走 1 格 = 图案换一副不相关的网——DRIFT 平移的同时形态沿 z 连续换形（与水波高度场的 z 维同职责），根治「刚性平移感」；波形侧同构造 z 速率 ≈ 0.675（WAVE_SPEED 1.5 折算），取同量级。嫌变得快降本值、嫌图案死板抬
+const vec2  CAUSTICS_DRIFT = vec2(0.0, 0.020); // 时间平移速度（uv/秒，沿旋转系压扁轴；caustics.glsl 侧 -= 与春v2 `sampleUV -=` 同号——图案沿压扁轴正向滚动）：世界速度 = 本值 / CAUSTICS_SCALE ≈ 3.3 块/秒（春v2 CAUSTICS_SPEED 0.13 折算）——2026-10 两轮调稀密度时同比缩放（0.065 → 0.0433 → 0.026）保持世界流速不变；2026-10-08 按反馈放缓：减半档 0.013（≈2.2 块/秒）实测过慢回退，取 0.020 温和档
+const float CAUSTICS_EVOLVE = 0.8;  // 三维噪声 z 维演化速度（lattice 格/秒，2026-10 焦散 3D 化接入）：z 走 1 格 = 图案换一副不相关的网——DRIFT 平移的同时形态沿 z 连续换形（与水波高度场的 z 维同职责），根治「刚性平移感」；波形侧同构造 z 速率 ≈ 0.675（WAVE_SPEED 1.5 折算），初档取同量级；2026-10-08 按反馈 0.6 → 0.8 加快形态变化，DRIFT 平移速度不动。嫌变得快降本值、嫌图案死板抬
 const float CAUSTICS_MOD   = 0.8;  // 次级通道调制权重：web = (1-n.g) × mix(n.r, 1, 本值)（春v2 同值）；嫌网碎抬 → 次级调制更弱、图案更由主通道独挑
 const float CAUSTICS_POWER = 3.0;  // pow 收网对比度（春v2 同值）：网稀嫌淡降、嫌网满抬
 const float CAUSTICS_TILT  = 0.2;  // 采样平面 y 斜置系数（BSL 同值）：xz − y·TILT——流动水面不同高度错开图案平面，跌水 / 阶梯水免竖直条纹
-const float CAUSTICS_BASE  = 0.22; // 存储背景（网谷）：读取端 ×BOOST 后 ≈ 0.6×tint
+const float CAUSTICS_BASE  = 0.22; // 存储背景（网谷）：读取端默认 ×BOOST 后 = 0.44×tint
 const float SHADOW_COLOR_WATER_A    = 0.5;  // shadowcolor0.a 水标记值（RGBA8 量化 128/255；非水几何恒写 1.0）
 const float SHADOW_COLOR_WATER_TEST = 0.75; // 读取端水标记判定阈（texelFetch 精确纹素，0.5 与 1.0 的中点）
-// 读取端 HDR 重建系数：vis = 存储 rgb × 本值——网谷 ≈ 0.6×tint、波前 ≈ 2.8×tint（直射光水下焦点亮度；
+// 读取端 HDR 重建系数：vis = 存储 rgb × 本值——默认网谷 = 0.44×tint、波前 = 2.0×tint（直射光水下焦点亮度；
 // 春v2 BRI_MIN/MAX 1.0→4.0 档两端折算，低配定位取收敛值）。实机 PCF 盘平均 + TAA 时间累积会再抹平一档。
 // **人眼在水下时整体乘渲染点 lm.y 的 pow2**（焦散水深门，2026-10 按反馈——人在水下时水越深焦散越浅：
 // lm.y = 天光级、水下随水深逐格衰减即水深代理；线性首档经 AgX 后不可辨、pow4 首档水下太黑，pow2 折中；
 // 水上恒 1 原观感不变，见 shadow.glsl「焦散水深门」段）
-#define WATER_CAUSTICS_BOOST 2.8 // [1.5 2.0 2.8 3.6]
+// 2026-10-08 按反馈调浅：默认 2.8 → 2.0；保留旧档供玩家选择。
+#define WATER_CAUSTICS_BOOST 2.0 // [1.5 2.0 2.8 3.6]
 
 // ---- 屏幕空间追踪阴影（lib/lighting/shadow.glsl screenSpaceShadowVisibility + lighting.glsl 接入，方案见 plans/屏幕空间追踪阴影方案.md）----
 // 沿主光源方向对 depthtex1 世界空间 ray march，一档追踪兼两职：近景补接触细节（normal offset /
@@ -682,9 +760,11 @@ const float SHADOW_SS_FAR_SCALE     = 1.0;  // D 外整体缩放（春v2 取 0.9
 // 上下两个方向的吸收雾整体编译剔除（纯清水：折射 + 反射仍在）。常量名对齐春v2 便于对照调参
 #define WATER_FOG
 #ifdef WATER_FOG
-const vec3  WATER_FOG_COLOR        = vec3(0.20, 0.80, 0.85); // 雾基色（水上透过水面的深水雾与水下整屏雾两路共用；春v2 默认档 0.20/0.75/0.90，2026-10 调参往返：两轮改绿至 0.20/0.85/0.75 过浓 → 回青蓝档 → 再改绿一档至此——BIOME_MIX 归零后纯色绿感比 biome 时代同数值更重，调参以实机为准）；归一化 [0,1] 域：吸收系数 = 1 − 基色。曾短暂与水下路分离、旋即按反馈合并回单值
+const vec3  WATER_FOG_COLOR        = vec3(0.20, 0.83, 0.80); // 雾基色（水上透过水面的深水雾与水下整屏雾两路共用；春v2 默认档 0.20/0.75/0.90，2026-10 调参往返：两轮改绿至 0.20/0.85/0.75 过浓 → 回青蓝档 → 再改绿一档至此——BIOME_MIX 归零后纯色绿感比 biome 时代同数值更重，调参以实机为准）；归一化 [0,1] 域：吸收系数 = 1 − 基色。曾短暂与水下路分离、旋即按反馈合并回单值；2026-10-08 按截图略偏绿：0.20/0.80/0.85 → 0.20/0.83/0.80，保留青色、不回浓绿档
 const float WATER_FOG_BIOME_MIX   = 0.0;  // 生物群系水色（水几何顶点色）混入雾基色的权重：默认水 tint 相当蓝（线性域 B ≈ 0.76 vs G ≈ 0.19），0.5 混入会把调好的绿色稀释成蓝——「改绿了看着还是蓝」的实测根因，2026-10 归零（雾色所见即所得 = 纯常量色）；代价是沼泽绿水与普通水同色，想找回生物群系差异回抬本值（≤ 0.1 才能保住 G 主导）
 const float WATER_FOG_SUN_SCALE   = 0.125; // 直射辐照度对雾色亮度的系数（春v2 fogColor 的 sunColor × 0.125 同值）：去饱太阳色调制直射贡献
+// 水下雾独立太阳项系数（2026-10-08）：0.125 → 0.10，降低白太阳项对雾的抬亮；水上档不动。
+const float WATER_UW_SUN_SCALE    = 0.10;
 const float WATER_FOG_SKY_SCALE   = 0.10; // 天空环境（vSkyAmbient）对雾色亮度的系数（本包适配：春v2 无此项）——**水上路**；水下走 WATER_UW_SKY_SCALE（2026-10 分离）
 const float WATER_UW_SKY_SCALE    = 0.30; // 天空环境项系数——**水下路**（2026-10 按反馈「水下雾偏白偏灰」分离抬档）：白天的雾色由半去饱和白太阳项主导（≈236×0.125 ≈ 29.5）vs 天空蓝项仅 ≈ skyAmbient×0.1，蓝项占比过低 = 雾发白发灰的根因之一；水下抬至 0.30 把雾色拉回青蓝。水上路多轮调参收敛、不随动；嫌还白继续抬本值
 const float WATER_FOG_BRIGHTNESS  = 1.0 / 24.0; // 水上雾色亮度总旋钮（2026-09 两轮反馈下调：原档满照雾色正午量级偏亮、实机观感「像自发光」，先 ×1/3 再 ×1/3——累计 1/9；2026-10 两轮续降：1/18 再 ×3/4 至 1/24）：乘在 waterFogLitColor 三项之和（直射 + 天空 + MIN_AMBIENT 地板）上；2026-10 与水下路分离（水下走 WATER_UW_FOG_BRIGHTNESS）；嫌淡按倍率回抬（观感近线性）
@@ -694,7 +774,15 @@ const float WATER_FOG_TRANSMIT    = 0.5;  // 水深吸收斜率（春v2 WATER_FO
 // 2026-10 三轮按反馈回抬降浓度——24 → 36 → 48 → 64（中点 12 格遮盖权重 39% → 28% → 22% → 17%，嫌还浓继续抬）
 #define WATER_UW_VISIBILITY 64.0 // [32.0 48.0 64.0 96.0 128.0]
 const float WATER_UW_TRANSMIT     = 0.28; // 水下距离吸收斜率（composite_fog 水下分支；与 WATER_FOG_TRANSMIT 分离独立调；2026-10 随 VISIBILITY 三轮同步下调：0.5 → 0.4 → 0.33 → 0.28）
-const float WATER_UW_FOG_BRIGHTNESS = 1.0 / 9.0; // 水下雾色亮度旋钮（结构同 WATER_FOG_BRIGHTNESS、作用 waterFogLitColor 三项之和；基色两路共用 WATER_FOG_COLOR）：分离时取 2026-09 两轮反馈的收敛值 1/9，水上路的续降不波及水下
+const float WATER_UW_FOG_BRIGHTNESS = 1.0 / 18.0; // 水下雾色亮度旋钮（结构同 WATER_FOG_BRIGHTNESS、作用 waterFogLitColor 三项之和；基色两路共用 WATER_FOG_COLOR）：分离时取 2026-09 两轮反馈的收敛值 1/9，水上路的续降不波及水下；2026-10-08 按反馈 1/9 → 1/15，雾色整体降低 40%（直接观视与水下 SSR 命中雾同源）；同日按截图再至 1/18（比 1/15 再降约 17%）
+// 水下物体额外彩色吸收（2026-10-08）：仅眼睛在水下且 WATER_FOG 开启时生效。
+// 深度代理 = 1 − lm.y²（与焦散天光 pow2 门互补），独立于眼到物体的距离雾；
+// exp(−(1−WATER_FOG_COLOR)·代理·本值)，红光比蓝光衰减快，近处深水物体也呈水色。
+// 0 = 关闭；不判物体是否在水中，水下看低天光岸壁 / 洞穴亦会偏色（按反馈接受的近似）。
+const float WATER_UW_SURFACE_ABSORPTION = 2.0;
+// 双重吸收后的水下物体亮度补偿（2026-10-08）：只乘物体着色，不提亮雾，不改指数吸收强度。
+// 1.0 = 无补偿；地形 / 实体 / 简单半透明共用，WATER_FOG 关闭或眼睛出水时不生效。
+const float WATER_UW_SURFACE_BRIGHTNESS = 1.35;
 // 水下雾环境光门（2026-10「无光水下雾依然很亮」修复；首版「线性 × 无地板」两轮调参后整形）：
 // eyeBrightnessSmooth 的**天光分量**（0..240）归一后经「幂 + 地板」整形乘进 waterFogLitColor 整体
 // ——雾色光照的 vDirectIrradiance / vSkyAmbient 是帧级 varying（海平面天空条件、无位置信息）、
@@ -717,6 +805,9 @@ const float WAVE_FREQUENCY        = 1.0;  // 世界 xz → 波形域频率（春
 // 波幅档位（春v2 同值；type1 以 pow(本值, 1.35) 混入高度 = 法线坡度的实际旋钮；再乘掠视角衰减
 //〔|dot(视线, 水面几何法线)| 线性——见下方注记，俯视全幅、掠视趋平〕）
 #define WAVE_HEIGHT 0.2 // [0.1 0.2 0.4 0.6]
+// 2026-10-08 恢复低频粗糙度 mask：波团疏密变化；每水像素共享两次采样。删宏回均匀波幅。
+// 2026-10-08 按反馈暂时关闭（游戏内 WATER 子屏仍可重新打开，或取消下行注释恢复默认开启）。
+//#define WAVE_ROUGHNESS_MASK
 // 足迹过滤仅法线侧：保留第一 octave，不恢复远距整波幅淡出。
 const float WAVE_FILTER_LOW = 0.35; // 高频 octave 噪声域像素足迹
 const float WAVE_FILTER_HIGH = 0.85;

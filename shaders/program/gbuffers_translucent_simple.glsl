@@ -35,6 +35,7 @@
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/utils/color.glsl"
 #include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
 #include "/lib/common/utils/noise.glsl"
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/pipeline/pass_order_marker.glsl"
@@ -76,9 +77,9 @@ void main() {
 
     // 图集 fetch 位于区域剔除之后（2026-10 性能）：TAAU 子区域外 band（屏幕覆盖型半透明几何的
     // ~1−S² buffer 片元）不再白付一次 fetch 后才被丢弃——同 gbuffers_translucent 玻璃分支形态；
-    // discard 后隐式 LOD 采样与本程序 before 路径的 normals 采样同款实践（helper invocation 语义）
-    vec4 color = texture(tex, vTexCoord) * vColor;
-    if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
+    // Explicit gradients remain valid after discard; mip footprint matches output resolution.
+    vec4 color = sampleMaterialTexture(tex, vTexCoord, duv1, duv2) * vColor;
+    if (color.a < CUTOUT_REF) discard; // cutout 透贴（引擎参考值钳制，constants.glsl 的 CUTOUT_REF）
 
     if (vAfterDeferred > 0.5) {
         // deferred 之后：光照图轻量着色（forwardLightmapShade）后按档合成（两档语义见头注）
@@ -101,7 +102,7 @@ void main() {
 #ifndef FORWARD_HW_BLEND
         vec3 viewNormal = gbufferViewNormal(dp1, dp2, duv1, duv2, vTexCoord);
         color.a = MATERIAL_NONE;
-        outMaterial = packGbufferMaterial(color, vTexCoord);
+        outMaterial = packGbufferMaterial(color, vTexCoord, duv1, duv2);
         outDetail = packGbufferDetail(viewNormal, vLmcoord);
 #endif
         outColor = vec4(0.0);

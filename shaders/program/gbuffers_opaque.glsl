@@ -15,6 +15,7 @@
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/pipeline/waving.glsl"
 #include "/lib/common/utils/packing.glsl"
@@ -37,8 +38,6 @@ layout(location = 0) out vec4 outMaterial; // colortex4
 layout(location = 1) out vec4 outDetail;  // colortex5
 
 void main() {
-    vec4 color = texture(tex, vTexCoord) * vColor;
-
     // 导数必须先于 discard：规范允许实现在 discard 后任意终止调用，quad 内被终止 texel 的寄存器
     // 值未定义、幸存像素的 dFdx/dFdy（及隐式 LOD）会拿到垃圾（cutout 边缘法线错乱的根源）；
     // 先集中求好再过 discard，TBN 构造与 normals 采样推迟到后面
@@ -49,7 +48,8 @@ void main() {
 
     // TAAU 子区域外片元剔除（纯性能剔除，纪律见 noise.glsl；本程序已有 cutout discard、Early-Z 无额外损失）
     if (outsideRenderRegion()) discard;
-    if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴（树叶等）
+    vec4 color = sampleMaterialTexture(tex, vTexCoord, duv1, duv2) * vColor;
+    if (color.a < CUTOUT_REF) discard; // cutout 透贴（树叶等）——引擎参考值钳制，见 constants.glsl 的 CUTOUT_REF
 
     // alpha 的 cutout 职责已尽，a 通道槽位改存物品标记（随 pack4x8To2x16 一同压缩进 colortex4.rg）
     color.a = vMaterialID;
@@ -81,7 +81,7 @@ void main() {
     }
 #endif
 
-    outMaterial = packGbufferMaterial(color, vTexCoord);
+    outMaterial = packGbufferMaterial(color, vTexCoord, duv1, duv2);
     outDetail = packGbufferDetail(viewNormal, vLmcoord); // lmcoord 存原始值
 }
 

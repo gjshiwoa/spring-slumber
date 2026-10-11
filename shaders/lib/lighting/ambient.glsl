@@ -85,6 +85,24 @@ vec3 observerHorizonGeometry() {
     return vec3(cosBeta, beta, PI - beta);
 }
 
+// 水下物体彩色吸收与独立亮度补偿（地形 / 前向实体 / 简单半透明共用单真源）。
+// lmSky 为 remapLightmap 后的物体天光级，不是眼位 eyeBrightnessSmooth；
+// 与焦散 pow2 天光门互补：满天光无额外吸收，深水低天光更偏蓝青。
+// 只调物体最终着色，不调雾色；composite_fog 的眼到物体距离吸收保留，二者分工。
+// 依赖 constants（WATER_FOG / WATER_FOG_COLOR / WATER_UW_SURFACE_ABSORPTION /
+// WATER_UW_SURFACE_BRIGHTNESS），返回有效颜色倍率（含补偿，不是纯透射率）。
+// 与 uniforms（isEyeInWater），均由 program 先行平铺 include。
+vec3 underwaterSurfaceColorScale(float lmSky) {
+#ifdef WATER_FOG
+    if (isEyeInWater == 1) {
+        float skyLight = clamp(lmSky, 0.0, 1.0);
+        float absorption = (1.0 - skyLight * skyLight) * WATER_UW_SURFACE_ABSORPTION;
+        return exp(-(vec3(1.0) - WATER_FOG_COLOR) * absorption) * WATER_UW_SURFACE_BRIGHTNESS;
+    }
+#endif
+    return vec3(1.0);
+}
+
 // 前向简单光照（光照图轻量着色）：前向半透明的「deferred 之后」路径消费——各项与
 // shadeSurface 的环境 / 方块光项逐项同源（辐照度形式），无直射 / 阴影 / 法线（阳光下略暗于
 // 受光地形，春v2 同取舍；夜视项不接——shadeSurface 亦无、避免与地形观感分叉，接的话两侧成对
@@ -98,7 +116,8 @@ vec3 forwardLightmapShade(vec3 albedoLinear, vec2 lm, vec3 skyAmbient) {
     vec3 irradiance = skyAmbient * lmPow4.y
                     + TORCHLIGHT_COLOR * (lmPow4.x * TORCHLIGHT_NEAR_SCALE + lm.x * TORCHLIGHT_FLOOR_SCALE)
                     + MIN_AMBIENT;
-    return (albedoLinear / PI) * irradiance * FORWARD_LIGHTMAP_BRIGHTNESS;
+    return (albedoLinear / PI) * irradiance * FORWARD_LIGHTMAP_BRIGHTNESS
+         * underwaterSurfaceColorScale(lm.y);
 }
 
 #ifdef STAGE_FRAGMENT
@@ -179,7 +198,7 @@ vec3 forwardEntityShade(vec3 albedoLinear, vec3 normalView, vec2 lm, vec3 viewPo
                     + skyAmbient * (lmPow4.y * hemisphere)
                     + TORCHLIGHT_COLOR * (lmPow4.x * TORCHLIGHT_NEAR_SCALE + lm.x * TORCHLIGHT_FLOOR_SCALE)
                     + MIN_AMBIENT;
-    return (albedoLinear / PI) * irradiance;
+    return (albedoLinear / PI) * irradiance * underwaterSurfaceColorScale(lm.y);
 }
 
 #endif

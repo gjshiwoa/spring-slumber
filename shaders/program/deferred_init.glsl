@@ -34,6 +34,11 @@
 // 兼写 colortex7：pass 顺序标记槽写 1（本 pass 之后的 gbuffers〔water / hand_water / weather〕读到 1、
 // 之前的〔textured 族〕读到 0，composite12 帧末复位），读取端 lib/common/pipeline/pass_order_marker.glsl；
 // 其余 texel 同位置读回透传、逐位保值
+// SR 超分（SR_UPSCALE）兼写 colortex31：用本 pass 已读取的 depthtex1 重投影，
+// 与 SR 配置的 noTranslucentDepthtex 同源（Iris getDepthTextureNoTranslucents）；
+// SR JSON 的资源名不是 GLSL sampler 别名，禁止声明 / 采样 noHandDepthtex。
+// depthtex1 在 beginTranslucents 内复制、随后立即执行 deferred，因此是本帧有效深度。
+// 实体层 b = 1 读回保留；其余像素写相机 MV。手部平移门控见 space.glsl。
 
 #define FULLSCREEN_DIRECT_TRANSMITTANCE
 
@@ -78,11 +83,21 @@ flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁�
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
+// 引擎输出指令必须直接检查 SR 注入宏，不能依赖派生 SR_* 宏：OptiFine 1.12 的
+// MacroState 连失活分支中的 #define 也登记，会误认 SR 已启用；GLSL 预处理器却
+// 正确跳过该定义。否则 DRAWBUFFERS 被漏扫（旧引擎不识别 RENDERTARGETS）。
+#if defined(SR_INSTALLED) && defined(SR_SHOULD_APPLY_SCALE) && SR_SHOULD_APPLY_SCALE == 1
+/* RENDERTARGETS: 4,6,7,31 */
+#else
 /* DRAWBUFFERS:467 */
+#endif
 
 layout(location = 0) out vec4 outBgSnapshot; // colortex4：背景快照（曝光归一化编码，water 折射 / SSR 位移采样读——机制见文件头）
 layout(location = 1) out vec4 outColor; // colortex6：场景颜色（前向半透明经硬件 alpha 混合直写叠加于其上——gbuffers 阶段无读者）
 layout(location = 2) out vec4 outMisc;  // colortex7：pass 顺序标记写 1 + 其余 texel 透传
+#ifdef SR_UPSCALE
+layout(location = 3) out vec4 outMotion; // colortex31：SR 运动矢量（相机重投影底层，实体层读回保留——见文件头）
+#endif
 
 void main() {
     // 几何信息（depthtex1 / colortex4/5）texelFetch 精确纹素读取——不插值、无 vTexCoord
@@ -170,6 +185,14 @@ void main() {
     // 此刻起 gbuffers 读到「deferred 之后」；其余 texel 读回透传逐位保值（colortex7 除标记外
     // 内容不变；同 pass 读 + 写与 composite12 透传同款已知取舍）
     outMisc = pixel == PASS_ORDER_MARKER_TEXEL ? vec4(1.0) : texelFetch(colortex7, pixel, 0);
+
+#ifdef SR_UPSCALE
+    // 与位置重建 / SR 解遮挡共用本帧不透明深度，复用上方 depth 避免额外 fetch。
+    // 不采样未绑定的 SR 资源名；b = 1 保留本帧实体 MV，其余写相机 MV。
+    vec4 entityMotion = texelFetch(colortex31, pixel, 0);
+    outMotion = entityMotion.b > 0.5 ? entityMotion
+              : vec4(srSceneMotionVector(uv, depth), 0.0, 1.0);
+#endif
 
     // 背景快照（colortex4）：编码 = 场景色 × 曝光 ÷ HEADROOM 进 [0,1]（RGBA16），water 经 gaux1
     // 采样 × HEADROOM ÷ 曝光解码——两端同帧读同一曝光槽位（含无效回退 1.0 的同一分支），精确还原、

@@ -57,11 +57,11 @@ flat out float vSkyLutValid;
 void main() {
     gl_Position = ftransform();
     vTexCoord = gl_MultiTexCoord0.xy;
-#if defined(FULLSCREEN_RENDER_REGION) && defined(TAAU)
-    // TAAU：本 pass（deferred_init / composite_fog 边界雾）的 quad 缩进与 gbuffers 相同的左下子区域；
-    // vTexCoord 同步缩为子区域物理 uv（fsh 走 texelFetch(gl_FragCoord) 不消费 vTexCoord，缩放仅保持
+#if defined(FULLSCREEN_RENDER_REGION) && (defined(TAAU) || defined(SR_UPSCALE))
+    // TAAU / SR 超分：本 pass（deferred_init / composite_fog 边界雾）的 quad 缩进与 gbuffers 相同的左下
+    // 子区域；vTexCoord 同步缩为子区域物理 uv（fsh 走 texelFetch(gl_FragCoord) 不消费 vTexCoord，缩放仅保持
     // 语义一致）。宏由 world0/deferred1 与 world0/composite2 入口定义；composite_taa / final 不定义、
-    // quad 全屏
+    // quad 全屏（SR 接管时 composite3 透传 SR 已写回的全屏 upscaled 色彩，同样保持全屏 quad）
     gl_Position.xy = gl_Position.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * gl_Position.w;
     vTexCoord *= RENDER_SCALE;
 #endif

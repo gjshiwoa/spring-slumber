@@ -159,8 +159,8 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     s0.xy = applyJitter(s0.xy);
     s1.xy = applyJitter(s1.xy);
 
-    // ---- TAAU 子区域（无 TAAU 时即全屏 [0,1]²，顺带清 jitter 越界的半纹素尾差）alpha 域裁剪 ----
-#ifdef TAAU
+    // ---- TAAU / SR_UPSCALE 子区域（无两者时即全屏 [0,1]²，顺带清 jitter 越界的半纹素尾差）alpha 域裁剪 ----
+#if defined(TAAU) || defined(SR_UPSCALE)
     vec2 limit = vec2(RENDER_SCALE);
 #else
     vec2 limit = vec2(1.0);

@@ -18,7 +18,7 @@
 // 坐标帧间随 jitter 相位跳动（远水被掠射透视放大到远超波特征的量级 = 法线 / 反射方向帧间随机、
 // TAA 收敛不住），故采样点一律换成未抖动像素中心视线与水面平面的交点（竖直流面〔瀑布 / 陡坡
 // 流动水〕按几何面水平度门控跳过，2026-10——见函数内「竖直流面门控」段注）。
-// **掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制；粗糙度 mask 同批取消，见 waves.glsl 头注）**：
+// **掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制；粗糙度 mask 于 2026-10-08 恢复，见 waves.glsl 头注）**：
 // 波幅混入系数乘掠视衰减系数 = mix(1, |dot(视线, 水面几何法线)|, WAVE_GRAZE_STRENGTH)（水平水 =
 // sin 仰角、裸点乘线性——点乘 1 完全粗糙 / 0 完全平坦；**玩家旋钮**：开关 WAVE_GRAZE_FADE +
 // 强度 WAVE_GRAZE_STRENGTH，删宏 = 恒 1 全视角全波幅逐位回退）：掠视（平视地平线方向的远水：波
@@ -55,8 +55,8 @@
 // 依赖由接入的 program 先行 include（lib 文件不嵌套——**同拆四件先行引入**：lib/water/waves.glsl /
 // lib/water/fog.glsl / lib/water/ssr.glsl / lib/water/reflection.glsl，后者又前置 atmosphere 三件
 //〔sky / aerial / fog〕与 lib/water/fog.glsl）；另需 constants.glsl（WAVE_PARALLAX /
-// WAVE_HEIGHT / WAVE_GRAZE_FADE / WAVE_GRAZE_STRENGTH〔波幅档 + 掠视角衰减开关 / 强度——
-// 三者在波形消费链本文件侧，文件头注〕/
+// WAVE_HEIGHT / WAVE_ROUGHNESS_MASK / WAVE_GRAZE_FADE / WAVE_GRAZE_STRENGTH〔波幅档 + 掠视角衰减开关 / 强度——
+// 上述选项在波形消费链本文件侧，文件头注〕/
 // WATER_DEJIT_MIN_UPNESS / WATER_REFRACTION_* / WATER_DIFFUSE_* / WATER_MIST_VISIBILITY /
 // WATER_FOG 宏分区 / WATER_GLINT_* / WATER_REFL_SKY_GATE_* / WATER_UW_REFL_* /
 // WATER_BG_SNAPSHOT_HEADROOM〔解码系数在 vsh〕 /
@@ -155,7 +155,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 假设无意义，且 |视线.y| ≈ 0 使一阶解饱和于 ±MAX_SHIFT——着色点 / SSR 起点沿视线在流面两侧整幅
     // 漂移（0.75 格）；跳过 = 回平几何着色（与去抖跳过同一取舍，水平静水 upness = 1 恒走视差）----
 
-    // ---- 掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制，文件头注；粗糙度 mask 同批取消）----
+    // ---- 掠视角波幅衰减（2026-10 按反馈重调的水闪烁抑制，文件头注；粗糙度 mask 独立调制）----
     // 波幅混入系数 = WAVE_HEIGHT 档的 pow(·, 1.35) × 掠视衰减系数：|dot(视线, 水面几何法线)|
     //（裸点乘线性映射：1 完全粗糙 / 0 完全平坦）经 WAVE_GRAZE_STRENGTH 的 mix(1, dot, 强度) 内插
     //——强度 1（默认）= 裸点乘、中间值整体抬底（0.5 = 掠视水保留一半波幅）；删 WAVE_GRAZE_FADE
@@ -169,6 +169,11 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     grazeFade = mix(1.0, abs(dot(viewDirW, faceNormalW)), WAVE_GRAZE_STRENGTH);
 #endif
     float waveAmp = pow(WAVE_HEIGHT, 1.35) * grazeFade;
+#ifdef WAVE_ROUGHNESS_MASK
+    // 恢复旧低频粗糙度 mask：视差前 / 去抖世界锚点一次求值，视差与法线共用。
+    // mix(1, mix(1, h, mask), amp) = mix(1, h, amp * mask)，不改高度函数接口。
+    waveAmp *= waterWaveRoughnessMask(worldPos.xz * WAVE_FREQUENCY);
+#endif
 
 #ifdef WAVE_PARALLAX
     if (faceUpness >= WATER_DEJIT_MIN_UPNESS) {
@@ -237,9 +242,9 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
 #endif
 
     // ---- 折射（春v2 waterRefractionCoord 的像素域改写）：波扰动（去基面 up）推背景采样位，
-    // 距离衰减防远水拉扯；采样位钳在渲染子区域内（TAAU 区域外是上帧全屏残留）----
+    // 距离衰减防远水拉扯；采样位钳在渲染子区域内（TAAU / SR_UPSCALE 区域外是上帧全屏残留）----
     vec2 viewSize = vec2(viewWidth, viewHeight);
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     vec2 regionMax = ceil(viewSize * RENDER_SCALE) - 1.5;
 #else
     vec2 regionMax = viewSize - 1.5;
@@ -292,7 +297,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
         // 更宽、波面明暗自然更强）
         float sunLift = mix(1.0, pow(clamp(dot(normalW, lightDirWorld), 0.0, 1.0), WATER_DIFFUSE_POWER),
                             WATER_DIFFUSE_STRENGTH);
-        vec3 fogLit = waterFogLitColor(fogBase, directIrradianceLit * sunLift, skyAmbient, WATER_FOG_SKY_SCALE,
+        vec3 fogLit = waterFogLitColor(fogBase, directIrradianceLit * sunLift, skyAmbient, WATER_FOG_SUN_SCALE, WATER_FOG_SKY_SCALE,
                                        WATER_FOG_BRIGHTNESS)
                     * clamp(lm.y, 0.0, 1.0);
         color *= exp(-(vec3(1.0) - fogBase) * deep * WATER_FOG_TRANSMIT);

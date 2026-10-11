@@ -79,7 +79,7 @@ void waterReflectionHitFog(inout vec3 color, vec3 surfaceViewPos, float surfaceW
 #ifdef WATER_FOG
         // 环境光门与 applyUnderwaterFog 同源（waterUwEnvLight）：TIR 镜像雾与直接观视的整屏水下雾
         // 同门调暗，无光洞窟中镜内 / 镜外亮度一致
-        vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_UW_SKY_SCALE,
+        vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_UW_SUN_SCALE, WATER_UW_SKY_SCALE,
                                        WATER_UW_FOG_BRIGHTNESS)
                     * waterUwEnvLight();
         color *= exp(-(vec3(1.0) - WATER_FOG_COLOR) * segDist * WATER_UW_TRANSMIT);
@@ -90,7 +90,7 @@ void waterReflectionHitFog(inout vec3 color, vec3 surfaceViewPos, float surfaceW
         float hitWorldY = viewToRelativeWorld(hitViewPos).y + cameraPosition.y;
         if (hitWorldY < surfaceWorldY - 0.2) {
 #ifdef WATER_FOG
-            vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_FOG_SKY_SCALE,
+            vec3 fogLit = waterFogLitColor(WATER_FOG_COLOR, directIrradiance, skyAmbient, WATER_FOG_SUN_SCALE, WATER_FOG_SKY_SCALE,
                                            WATER_FOG_BRIGHTNESS)
                         * clamp(lm.y, 0.0, 1.0);
             color *= exp(-(vec3(1.0) - WATER_FOG_COLOR) * segDist * WATER_FOG_TRANSMIT);

@@ -3,7 +3,10 @@
 //（composite_taa 后、未曝光）+ colortex1 tile0 → 线性域合成 bloom（getBloom × BLOOM_STRENGTH，
 // 水下整体 × BLOOM_UW_STRENGTH_MULT——2026-10 按反馈的水下泛光增益）
 // → 乘 vExposure（composite12 写入槽位，vsh 取一次经 varying 传入）→ RCAS 锐化（春雷移植，
-// 见下）→ AgX → linearToSrgb 输出屏幕。linearToSrgb 是全管线唯一离开线性空间的位置；
+// 见下）→ 色彩滤镜（tonemap 前线性域：亮度 / 对比度 / 饱和度，游戏内设置，三值 1.0 逐位直通，
+// 见 constants.glsl 色彩滤镜段）→ tonemap 算子（applyTonemap，TONEMAP 宏切换 AgX / Filmic /
+// ACES / Hable——AgX 为本包原有、余三者春雷移植，均输出 display-referred linear）→
+// linearToSrgb 输出屏幕。linearToSrgb 是全管线唯一离开线性空间的位置；
 // 原 composite13/14 两全屏 pass 的主颜色读写往返与 colortex7 全屏透传（~46B/px@1080p）由此消除
 //
 // RCAS（FSR1，春雷移植；「感知域统计 + 线性域组合」形态——按性能反馈重构，首版「十字 5-tap
@@ -50,6 +53,16 @@ in float vExposure; // 本帧自适应曝光（composite12 已写入槽位）
 layout(location = 0) out vec4 outColor;
 
 void main() {
+#if TAA_DEBUG_VIEW > 0 && !defined(SR_UPSCALE)
+    // 显示原始诊断值，不受曝光、bloom、RCAS、滤镜或 gamma 干扰。
+    float debugValue = texelFetch(colortex6, ivec2(gl_FragCoord.xy), 0).a;
+#if TAA_DEBUG_VIEW == 1
+    outColor = vec4(1.0 - debugValue, debugValue, 0.0, 1.0);
+#else
+    outColor = vec4(vec3(debugValue), 1.0);
+#endif
+    return;
+#endif
     // bloom 先行取一次（tonemap 前线性域合成；低频场对十字邻域近似恒定，5-tap 共享、泛光不参与锐化）；
     // 水下整体增益（BLOOM_UW_STRENGTH_MULT，uniform 分支——水下雾介质包住高对比亮部、泛光观感偏弱）
     float bloomStrength = BLOOM_STRENGTH * (isEyeInWater == 1 ? BLOOM_UW_STRENGTH_MULT : 1.0);
@@ -61,7 +74,7 @@ void main() {
 
 #ifdef RCAS
     // 天空门控见文件头：几何像素才锐化（分支内 texelFetch 无隐式导数、安全）
-#ifdef TAAU
+#if defined(TAAU) || defined(SR_UPSCALE)
     ivec2 depthPixel = ivec2(vec2(pixel) * RENDER_SCALE); // 屏幕域 → 渲染子区域（子区域外 depth 为 clear 值）
 #else
     ivec2 depthPixel = pixel;
@@ -86,7 +99,15 @@ void main() {
     }
 #endif
 
-    outColor = vec4(linearToSrgb(agx(color)), 1.0);
+    // 色彩滤镜（tonemap 前线性域，游戏内设置）：RCAS 之后施加（锐化统计不吃滤镜）、曝光之后
+    //（自动曝光测光在 composite12、观感旋钮不被曝光反噬）。对比度绕线性中灰枢轴、饱和度向
+    // Rec.709 luma 收放；饱和度 >1 的低通道负过冲与对比度 >1 的暗端负过冲由 applyTonemap
+    // 入口统一钳非负（见 tonemap.glsl），三值 1.0 = 逐位直通
+    color *= COLOR_BRIGHTNESS;
+    color = mix(vec3(COLOR_CONTRAST_PIVOT), color, COLOR_CONTRAST); // = (c−p)·k+p 同式；mix 形态在 k=1.0 时 (1−a) 恰为 0、逐位直通（展开式枢轴往返有 ≤1 ULP 舍入）
+    color = mix(vec3(rgbToLuma(color)), color, COLOR_SATURATION);
+
+    outColor = vec4(linearToSrgb(applyTonemap(color)), 1.0);
 }
 
 #endif

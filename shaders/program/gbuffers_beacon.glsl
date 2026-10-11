@@ -11,6 +11,7 @@
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
 #include "/lib/common/utils/noise.glsl"
@@ -28,7 +29,9 @@ layout(location = 0) out vec4 outMaterial; // colortex4
 layout(location = 1) out vec4 outDetail;  // colortex5
 
 void main() {
-    vec4 color = texture(tex, vTexCoord) * vColor;
+    // Precompute material gradients before discard or divergent branches.
+    vec2 duv1 = dFdx(vTexCoord);
+    vec2 duv2 = dFdy(vTexCoord);
 
     // 位置屏幕导数先于 discard 求好（同 gbuffers_opaque 的顺序约束）；cross / normalize
     // 推迟到核心分支，外壳分支不做这部分工作
@@ -38,7 +41,8 @@ void main() {
     // TAAU 子区域外片元剔除（纪律见 noise.glsl；beacon 光柱为全高几何、跨视锥边界的三角形最多，
     // 本程序已有 cutout discard、Early-Z 无额外损失）
     if (outsideRenderRegion()) discard;
-    if (color.a < ALPHA_CUTOUT) discard; // cutout 透贴
+    vec4 color = sampleMaterialTexture(tex, vTexCoord, duv1, duv2) * vColor;
+    if (color.a < CUTOUT_REF) discard; // cutout 透贴（引擎参考值钳制，constants.glsl 的 CUTOUT_REF）
 
     vec4 previousMaterial = texelFetch(gaux1, ivec2(gl_FragCoord.xy), 0);
 

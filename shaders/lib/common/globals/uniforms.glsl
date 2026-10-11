@@ -26,7 +26,20 @@ uniform sampler2D colortex7; // 杂项数据缓冲（clear = false，左下角�
 uniform sampler2D depthtex0; // 深度缓冲（全部几何）；deferred 时刻除不透明外可能已含 deferred 前绘制的 textured 族（粒子 / 闪电）深度，天空判定须用 depthtex1；composite 时刻含半透明与手，TAA 重投影取十字最近片元
 uniform sampler2D depthtex1; // 深度缓冲（仅不透明几何，含手部；粒子等非不透明写入被排除）：deferred_init 天空判定 / 光照位置重建用
 
+// ---- SR 超分模组（superresolution.v3.json；SR_UPSCALE 由 constants.glsl 依 mod 注入宏派生，
+//      须先于本文件引入——各 program 的既有引入序已满足）----
+#if defined(SR_UPSCALE)
+uniform sampler2D colortex31; // SR 运动矢量缓冲（colortex31Format = RGBA16F）：rg = 本帧→上帧位移（渲染分辨率归一 uv 域、无抖动采样位）、b = 实体层标记（gbuffers_entities 写 1、deferred_init 读回保留实体 MV / 其余写相机 MV）。SR 只读不写
+uniform vec2 SRJitterOffset;  // SR 当前帧 jitter（渲染分辨率像素域，与 noise.glsl 的 Halton 表同域约定）：taaJitterSample 消费——applyTAAJitter / applyJitter / vJitter 全链自动跟进
+#endif
+
 uniform vec4 entityColor; // 实体着色（受伤红闪等），rgb 为目标色，a 为混合权重；仅 gbuffers_opaque_entities 使用
+
+// 引擎 alpha test 参考值（OptiFine 文档的标准消费式 = if (color.a < alphaTestRef) discard;），逐 draw
+// 更新。Iris 在 alphaTest.* = off 下恒 0（off 映射 ALWAYS、取其 reference 0），老 OptiFine（1.12-）不
+// 识别该 uniform 亦恒 0——pass 侧统一经 constants.glsl 的 CUTOUT_REF 钳制消费（下限 ALPHA_CUTOUT
+// 兜底），全版本一致；shadow 阶段不消费（恒 ALPHA_CUTOUT）
+uniform float alphaTestRef;
 
 uniform float viewWidth;  // 视口宽度（像素）；lib/post/bloom.glsl 计算 colortex6 源纹素尺寸
 uniform float viewHeight; // 视口高度（像素）；同上

@@ -71,6 +71,45 @@ vec2 viewDirectionToPreviousScreen(vec3 dirView) {
     return prevClip.xy / prevClip.w * 0.5 + 0.5;
 }
 
+// ---------------- SR 超分运动矢量（SR mod，superresolution.v3.json；constants.glsl 的
+// SR_UPSCALE / SR_ENTITY_VELOCITY 须先行引入）----------------
+// 域约定：入参 uv 一律为「无抖动全视场 uv」（= 子区域 buffer uv 经 applyInverseJitter 归一——
+// 子区域渲染下全视场 uv 即渲染分辨率归一 uv，SR 的 MV 域定义）；返回 prev − cur。
+// 上帧的子区域缩放与本帧互逆（buffer uv = 全视场 uv·S + jitter），故两侧全视场 uv 之差 =
+// 渲染分辨率域 MV、无额外换算。prevClip.w <= 0（上帧相机背后 / 出视锥）置 0：该像素上帧
+// 不存在、位移无意义，交超分算法的解遮挡检测处置
+#if defined(SR_UPSCALE)
+// 场景（相机运动）运动矢量：depth 由调用方传入（deferred_init 采样 depthtex1——与 SR 的
+// noTranslucentDepthtex 输入同源；SR 资源名不能作为 GLSL sampler 使用）。
+// 天空（depth >= 1）走远平面方向旋转链（w = 0 平移失效，只随相机旋转），几何走相对世界坐标
+// + 相机位移重投影（relativeWorldToPreviousScreen 同链内联，w 守卫归并）
+vec2 srSceneMotionVector(vec2 uv, float depth) {
+    vec4 prevClip;
+    if (depth >= 1.0) {
+        prevClip = gbufferPreviousProjection * gbufferPreviousModelView
+                 * vec4(viewToWorldDirection(screenToViewCanonical(uv, 1.0)), 0.0);
+    } else {
+        // 手部跟随相机，不叠相机平移（与本包 TAA / SR 文档示例同约定）；
+        // depthtex1 含不透明手，不能把它当固定世界几何做平移重投影。
+        vec3 cameraDelta = depth < TAA_HAND_DEPTH ? vec3(0.0)
+                         : cameraPosition - previousCameraPosition;
+        prevClip = gbufferPreviousProjection * gbufferPreviousModelView * vec4(
+            viewToRelativeWorld(screenToViewCanonical(uv, depth)) + cameraDelta, 1.0);
+    }
+    return prevClip.w > 1e-5 ? prevClip.xy / prevClip.w * 0.5 + 0.5 - uv : vec2(0.0);
+}
+#endif
+#if defined(SR_ENTITY_VELOCITY)
+// 实体层运动矢量：velocity = at_velocity（观察空间「到上一帧顶点位置的偏移」，仅实体 / 方块
+// 实体绑定——SR 的 Iris 扩展供给，gbuffers_opaque_entities 的 vsh 声明）——viewPos + velocity
+// 即上帧观察空间位置、直接过上帧投影（相机运动已含在偏移内，无须 cameraDelta）；curUv =
+// fsh 将 vsh 传入的无抖动 vec4 clip 位置在插值后除 w 得到的全视场 uv（不得先除 w 再插值）
+vec2 srEntityMotionVector(vec3 viewPos, vec3 velocity, vec2 curUv) {
+    vec4 prevClip = gbufferPreviousProjection * vec4(viewPos + velocity, 1.0);
+    return prevClip.w > 1e-5 ? prevClip.xy / prevClip.w * 0.5 + 0.5 - curUv : vec2(0.0);
+}
+#endif
+
 // ---------------- 阴影屏幕换算（写读两侧同一实现，任意阶段可用） ----------------
 
 // 线性扭曲因子：中心（d = 0）为 1 - SHADOW_DISTORT_FACTOR = 0.15，纹素密度放大约 6.7 倍；边缘（d = 1）为 1 不缩放

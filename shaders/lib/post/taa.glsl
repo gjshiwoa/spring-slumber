@@ -1,7 +1,8 @@
 // 轻量 TAA / TAAU：相位感知 3x3 重建与统计共用样本，曝光归一化 Reinhard-YCoCg 域累积。
 // 借鉴 ITRP FSR2 的距离加权统计 / 去振铃 / 历史修正思想；不新增缓冲、compute 或速度附件。
 // 当前色完整补偿光栅 jitter；十字最近深度锚点去抖后重投影，历史 alpha 保存本帧观察深度。
-// 解遮挡更新独立于防闪门控；软修正只放宽方差盒，样本极值盒仍为硬边界，防 HDR 过冲累积。
+// 默认常量混合，深度 / 速度不调权；颜色域历史修正仍约束解遮挡及场景变化。
+// 删 TAA_FIXED_BLEND 回旧自适应档；两档都保留样本极值硬边界，防 HDR 过冲累积。
 // 依赖（program 平铺引入）：constants.glsl、uniforms.glsl、utils/color.glsl、filters.glsl、
 // space.glsl、utils/noise.glsl（applyInverseJitter——锚点去抖基底）。
 #ifndef LIB_POST_TAA_GLSL
@@ -236,6 +237,25 @@ float taaHistoryFootprintConfidence(vec2 historyUV, vec2 viewSize, float expecte
 }
 #endif
 
+#ifdef TAA_FIXED_BLEND
+// 颜色域单独修正历史：轮廓覆盖率 / 深度 / 运动波动不再收紧方差盒。
+// 高反差轮廓按越出真实样本盒的距离判变，避免前背景均值摆动拉动历史；
+// 真正变色仍受极值硬盒约束，不允许旧色无限保留或超出当前样本范围。
+vec3 taaRectifyFixedHistory(vec3 history, TaaNeighborhood stats) {
+    float edgeContrast = smoothstep(TAAU_EDGE_CONTRAST_LOW, TAAU_EDGE_CONTRAST_HIGH,
+                                    stats.hi.x - stats.lo.x);
+    float clipGamma = mix(TAA_CLIP_GAMMA, TAAU_EDGE_CLIP_GAMMA, edgeContrast);
+    vec3 lo = max(stats.mean - clipGamma * stats.sigma, stats.lo);
+    vec3 hi = min(stats.mean + clipGamma * stats.sigma, stats.hi);
+    vec3 bounded = taaClipBox(history, stats.lo, stats.hi);
+    vec3 clipped = taaClipBox(bounded, lo, hi);
+    float changeDistance = mix(length(history - stats.mean), length(history - bounded), edgeContrast);
+    float colorChange = smoothstep(TAA_RECTIFY_CHANGE_LOW, TAA_RECTIFY_CHANGE_HIGH, changeDistance);
+    float repair = mix(TAA_RECTIFY_STABLE, 1.0, colorChange);
+    return mix(bounded, clipped, repair);
+}
+#endif
+
 vec3 taaRectifyHistory(vec3 history, TaaNeighborhood stats, float depthConf, float motion,
                        out float clipDistance) {
     float clipGamma = TAA_CLIP_GAMMA;
@@ -267,13 +287,22 @@ vec3 taaRectifyHistory(vec3 history, TaaNeighborhood stats, float depthConf, flo
     return mix(bounded, clipped, repair);
 }
 
-vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float outHistoryDepth) {
+vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure,
+                out float outHistoryDepth, out float debugValue) {
+    // 诊断标量仅写主颜色的闲置 alpha，RGB / 历史 / 测光保持正常；默认档编译剔除。
+    debugValue = 0.0; // 无历史 / 越界：深度拒绝，尚无可量化的历史钳制
+#if TAA_DEBUG_VIEW == 2
+    debugValue = 1.0; // 无历史 / 越界：全量当前帧
+#endif
     vec2 viewSize = vec2(viewWidth, viewHeight);
 #ifdef TAAU
     vec2 renderResF = floor(viewSize * RENDER_SCALE + 0.5);
     ivec2 renderRes = ivec2(renderResF);
     // 光栅缩放取精确 S；整数有效区仅用于 tap 边界，不改变投影坐标尺度。
-    ivec2 renderPixel = clamp(ivec2(uv * viewSize * RENDER_SCALE), ivec2(0), renderRes - 1);
+    // 与颜色重建共用完整补抖后的源位置。先选真实光栅样本，再对锚点去抖；
+    // 先在无抖动位置选深度会在轮廓处误选另一表面，令历史置信度随相位翻转。
+    vec2 sourcePosition = uv * viewSize * RENDER_SCALE + jitterUV * viewSize;
+    ivec2 renderPixel = clamp(ivec2(floor(sourcePosition)), ivec2(0), renderRes - 1);
 #else
     ivec2 renderRes = ivec2(viewSize);
     ivec2 renderPixel = pixel;
@@ -285,8 +314,7 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     float upsampleConfidence = 1.0;
 #ifdef TAAU
     // applyTAAJitter 在缩放后平移完整 jitter；源色采样必须等量补偿，半补偿会留下相位漂移。
-    vec3 current = taaReconstruct(uv * viewSize * RENDER_SCALE + jitterUV * viewSize,
-                                  renderRes, exposure, stats, upsampleConfidence);
+    vec3 current = taaReconstruct(sourcePosition, renderRes, exposure, stats, upsampleConfidence);
 #else
     stats = taaCrossStatistics(renderPixel, renderRes, exposure);
     vec3 current = rgbToYCoCg(taaTonemap(max(textureLod(colortex6, uv + jitterUV * 0.5, 0.0).rgb, vec3(0.0)) * exposure));
@@ -317,6 +345,8 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     vec2 historyUV = uv - velocity;
     bool invalid = previousClip.w <= 0.0 || any(lessThan(historyUV, vec2(0.0))) || any(greaterThan(historyUV, vec2(1.0)));
     if (invalid || frameCounter == 0) return max(taaInverseTonemap(yCoCgToRgb(current)) / exposure, vec3(0.0));
+    // 常量档正常画面不读历史深度；深度置信仅在诊断 1 或旧自适应档计算。
+#if !defined(TAA_FIXED_BLEND) || TAA_DEBUG_VIEW == 1
     ivec2 historyPixel = clamp(ivec2(historyUV * viewSize), ivec2(0), ivec2(viewSize) - 1);
     float historyDepth = texelFetch(colortex3, historyPixel, 0).a;
     float velocityPx = length(velocity * viewSize);
@@ -329,17 +359,28 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
         depthConf = taaHistoryFootprintConfidence(historyUV, viewSize, expectedDepth, depthConf, motion);
     }
 #endif
+#endif
     vec3 historyLinear;
     if (isSky) historyLinear = textureLod(colortex3, historyUV, 0.0).rgb;
     else historyLinear = catmullRom5(colortex3, historyUV, viewSize, TAA_HISTORY_SHARPNESS).rgb;
     vec3 history = rgbToYCoCg(taaTonemap(max(historyLinear, vec3(0.0)) * exposure));
+#if TAA_DEBUG_VIEW == 3
+    vec3 unrectifiedHistory = history;
+#endif
+#ifdef TAA_FIXED_BLEND
+    history = taaRectifyFixedHistory(history, stats);
+#else
     float clipDistance;
     history = taaRectifyHistory(history, stats, depthConf, motion, clipDistance);
+#endif
 #ifdef TAAU
     float blendBase = TAAU_BLEND_BASE;
 #else
     float blendBase = TAA_BLEND_BASE;
 #endif
+#ifdef TAA_FIXED_BLEND
+    float blend = blendBase;
+#else
     float blend = max(blendBase + velocityPx * TAA_BLEND_MOTION, TAA_BLEND_MIN);
     float confidence = pow(upsampleConfidence, TAAU_CONFIDENCE_POWER);
     blend *= confidence * (1.0 - clipDistance);
@@ -351,6 +392,14 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure, out float o
     float disocclusion = 1.0 - depthConf;
     blend = max(blend, mix(TAA_BLEND_DISOCCCLUSION * disocclusion, 1.0, disocclusion * disocclusion));
     if (isHand) blend = max(blend, TAA_BLEND_HAND_MIN);
+#endif
+#if TAA_DEBUG_VIEW == 1
+    debugValue = depthConf;
+#elif TAA_DEBUG_VIEW == 2
+    debugValue = clamp(blend, 0.0, 1.0);
+#elif TAA_DEBUG_VIEW == 3
+    debugValue = clamp(length(unrectifiedHistory - history) * TAA_DEBUG_CLIP_GAIN, 0.0, 1.0);
+#endif
     vec3 resolved = mix(history, current, clamp(blend, 0.0, 1.0));
     return max(taaInverseTonemap(yCoCgToRgb(resolved)) / exposure, vec3(0.0));
 }

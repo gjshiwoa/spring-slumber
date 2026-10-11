@@ -2,6 +2,7 @@
 // 依赖先行 include：lib/common/globals/constants.glsl（MATERIAL_*）、
 //   lib/common/globals/uniforms.glsl（normals / specular）、lib/common/utils/space.glsl（calculateTBN）、
 //   lib/common/utils/packing.glsl（pack4x8To2x16 / encodeOctahedral），
+//   lib/common/pipeline/material_texture.glsl (sampleMaterialTexture),
 //   由 program 在本文件之前 include
 #ifndef LIB_MATERIAL_GLSL
 #define LIB_MATERIAL_GLSL
@@ -36,7 +37,7 @@ bool isVegetationId(float blockId) {
 vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord, out vec3 geomNormalView) {
     mat3 tbn = calculateTBN(dp1, dp2, duv1, duv2);
     geomNormalView = tbn[2];
-    return normalize(tbn * (texture(normals, texCoord).rgb * 2.0 - 1.0));
+    return normalize(tbn * (sampleMaterialTexture(normals, texCoord, duv1, duv2).rgb * 2.0 - 1.0));
 }
 
 // 其他 gbuffer 消费方维持原接口；未消费的 out 值可由编译器剔除。
@@ -46,8 +47,8 @@ vec3 gbufferViewNormal(vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2, vec2 texCoord) 
 }
 
 // colortex4 输出：rg = 打包 albedo（rgba 已带标记位 a）、ba = 打包高光贴图 RGBA（labPBR 全量）
-vec4 packGbufferMaterial(vec4 texcolorMarked, vec2 texCoord) {
-    return vec4(pack4x8To2x16(texcolorMarked), pack4x8To2x16(texture(specular, texCoord)));
+vec4 packGbufferMaterial(vec4 texcolorMarked, vec2 texCoord, vec2 duv1, vec2 duv2) {
+    return vec4(pack4x8To2x16(texcolorMarked), pack4x8To2x16(sampleMaterialTexture(specular, texCoord, duv1, duv2)));
 }
 
 // colortex5 输出：rg = 八面体观察空间法线、ba = 原始 lmcoord（读取端 remapLightmap）

@@ -16,6 +16,7 @@
 // 仅片段阶段；依赖由接入的 program 先行 include：uniforms.glsl / constants.glsl（含 PI）/
 //   utils/space.glsl（viewToWorldDirection / viewToRelativeWorld / remapSaturate）/
 //   lighting/shadow.glsl（sampleShadowVisibility，SHADOW_SCREEN_SPACE 时兼 screenSpaceShadowVisibility）
+//   lighting/ambient.glsl（underwaterSurfaceColorScale：水下物体按天光级追加彩色吸收与独立亮度补偿）
 #ifndef LIB_LIGHTING_GLSL
 #define LIB_LIGHTING_GLSL
 
@@ -171,7 +172,8 @@ vec3 shadeSurface(vec3 albedo, vec3 normalView, vec2 lm, vec3 viewPos, vec3 dire
 
     // Lambert BRDF = albedo/π，全部辐照度一次相乘（直射余弦取 wrap 重映射值）；直射 GGX 高光
     // 加性叠在其上（镜面项非漫反射、不经 albedo/π）
-    return (albedo / PI) * (directTerm + skyIrradiance + blockIrradiance + MIN_AMBIENT) + directSpecular;
+    return ((albedo / PI) * (directTerm + skyIrradiance + blockIrradiance + MIN_AMBIENT) + directSpecular)
+         * underwaterSurfaceColorScale(lm.y);
 }
 
 #endif

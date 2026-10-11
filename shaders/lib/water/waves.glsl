@@ -31,14 +31,14 @@
 // 见该文件头注与函数内段注）。
 // 性能（按真实纹理 fetch 计——旧头注曾按「3D 采样」折半计 18/30，实际纹理 fetch 为其两倍）：每高度
 // 求值 = fbm 双层 ×2 octave × 切层 2 = 8 fetch——法线差分 3 求值 = 24、WAVE_PARALLAX 再 +2 求值 =
-// 40（删视差宏回 24）。粗糙度 mask（春v2 getwaves1RoughnessMask 谱系，逐点 2 fetch → 后改全像素
-// 共享 +2）已按反馈整体取消（2026-10），git 历史含完整形态；嫌重砍 waterWaveHeightRaw 的 pB 层
-//（每求值 −4、合计 −20）。
+// 40（删视差宏回 24）。2026-10-08 恢复粗糙度 mask：全像素共享单次 +2 fetch，
+// 开启 WAVE_ROUGHNESS_MASK 后为 26 / 42；关闭即回原采样预算。嫌重砍 pB 层（每求值 −4）。
 // 采样基元与焦散侧成对维护（lib 不嵌套、两处就地镜像）：waterNoiseTexel / waterNoise3D ↔
 // lib/lighting/caustics.glsl 的 causticsNoiseTexel / causticsNoise3D（2026-10 焦散噪声 3D 化起
 // 同构造，constants.glsl 的 CAUSTICS_* 段注同引）。
 // 依赖由接入的 program 先行 include（lib 文件不嵌套）：constants.glsl（WAVE_* /
-// noiseTextureResolution）、uniforms.glsl（noisetex / frameTimeCounter）
+// noiseTextureResolution）、uniforms.glsl（noisetex / frameTimeCounter）、utils/space.glsl
+//（remapSaturate，仅 WAVE_ROUGHNESS_MASK 开启时需要）
 #ifndef LIB_WATER_WAVES_GLSL
 #define LIB_WATER_WAVES_GLSL
 
@@ -93,9 +93,27 @@ float waterFbm(vec3 p, float footprint) {
 const mat2 WAVE_ROT_A = mat2( 0.7316889,  0.6816388, -0.6816388, 0.7316889);
 const mat2 WAVE_ROT_B = mat2( 0.9553365,  0.2955202, -0.2955202, 0.9553365);
 
-// 波形高度原始值（春v2 getwaves1 同构，粗糙度 mask 已按反馈取消——曾以两组慢漂移低频采样调制
-// 波形对比制造「波团疏密」，2026-10 连共享求值一并移除，git 历史含完整形态）：双旋转拉伸层 mix；
-// 高度域 ~[0,1]、均值 1 附近
+#ifdef WAVE_ROUGHNESS_MASK
+// 粗糙度 mask（春v2 getwaves1RoughnessMask 同款）：两组慢漂移低频采样调制波形对比——波团有疏密。
+// **mask 单次求值共享（2026-10 性能）**：mask 特征尺度 ~56 / ~22 格（0.018 / 0.045 频率），而消费
+// 它的高度求值点散布 ≤ ~0.8 格（法线差分 ε = 0.05 ×2 + 视差位移 ≤ 0.75）——逐点求值与共享值之差
+// 为波长 1~3% 量级、远低于波场自身平滑度，故由 shadeWaterSurface 在波形采样锚点一次算好传入
+//（省每求值 2 fetch：法线 3 求值 + 视差 2 求值合计 50 → 42）；锚点取视差前的去抖 worldPos.xz
+//（帧间稳定，mask 不随视差迭代漂移）
+float waterWaveRoughnessMask(vec2 pos) {
+    float tM = frameTimeCounter * WAVE_SPEED * 0.06;
+    vec2 mp0 = pos * 0.018 + vec2(tM, tM * 0.7);
+    vec2 mp1 = pos * 0.045 - vec2(tM * 0.5, tM * 0.9) + vec2(53.1, 11.7);
+    float m0 = waterNoiseTexel(mp0 / float(noiseTextureResolution));
+    float m1 = waterNoiseTexel(mp1 / float(noiseTextureResolution));
+    float mask = mix(m0, m1, 0.33);
+    return remapSaturate(mask, 0.25, 0.75, 0.33, 1.0);
+}
+
+#endif
+
+// 波形高度原始值（春v2 getwaves1 同构）：双旋转拉伸层 mix；
+// 粗糙度 mask 在 surface.glsl 单次求值并乘入 amplitude，全部高度采样共享。高度域 ~[0,1]。
 float waterWaveHeightRaw(vec2 pos, float footprint) {
     float t = frameTimeCounter * WAVE_SPEED * 3.0;
 
