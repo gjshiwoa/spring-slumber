@@ -1,5 +1,5 @@
 // 材质贴图采样：以输出分辨率的 UV 足迹选择 mip，而非低分辨率子区域的足迹。
-// 依赖先行 include：constants.glsl（TAAU / SR_UPSCALE / RENDER_SCALE）。
+// 依赖先行 include：constants.glsl（TAAU / SR_UPSCALE / EFFECTIVE_RENDER_SCALE）。
 // 仅用于经过 applyTAAJitter 子区域缩放的几何材质（tex / normals / specular）；
 // shadow、未缩放的天空贴图、屏幕缓冲与噪声不得接入。
 #ifndef LIB_MATERIAL_TEXTURE_GLSL
@@ -11,9 +11,9 @@
 vec4 sampleMaterialTexture(sampler2D tex, vec2 texCoord, vec2 duv1, vec2 duv2) {
 #if defined(TAAU) || defined(SR_UPSCALE)
     // 低分辨率导数约为原生的 1/S，乘 S 抵消：等效 mip bias = log2(S)。
-    // SR 生效时 constants.glsl 已用 SR_RENDER_SCALE_FACTOR 覆盖 RENDER_SCALE。
-    duv1 *= RENDER_SCALE;
-    duv2 *= RENDER_SCALE;
+    // SR 生效时 EFFECTIVE_RENDER_SCALE 已是 SR_RENDER_SCALE_FACTOR（constants.glsl 派生）。
+    duv1 *= EFFECTIVE_RENDER_SCALE;
+    duv2 *= EFFECTIVE_RENDER_SCALE;
 #endif
     return textureGrad(tex, texCoord, duv1, duv2);
 }

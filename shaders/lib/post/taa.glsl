@@ -296,12 +296,12 @@ vec3 resolveTAA(vec2 uv, ivec2 pixel, vec2 jitterUV, float exposure,
 #endif
     vec2 viewSize = vec2(viewWidth, viewHeight);
 #ifdef TAAU
-    vec2 renderResF = floor(viewSize * RENDER_SCALE + 0.5);
+    vec2 renderResF = floor(viewSize * EFFECTIVE_RENDER_SCALE + 0.5);
     ivec2 renderRes = ivec2(renderResF);
     // 光栅缩放取精确 S；整数有效区仅用于 tap 边界，不改变投影坐标尺度。
     // 与颜色重建共用完整补抖后的源位置。先选真实光栅样本，再对锚点去抖；
     // 先在无抖动位置选深度会在轮廓处误选另一表面，令历史置信度随相位翻转。
-    vec2 sourcePosition = uv * viewSize * RENDER_SCALE + jitterUV * viewSize;
+    vec2 sourcePosition = uv * viewSize * EFFECTIVE_RENDER_SCALE + jitterUV * viewSize;
     ivec2 renderPixel = clamp(ivec2(floor(sourcePosition)), ivec2(0), renderRes - 1);
 #else
     ivec2 renderRes = ivec2(viewSize);

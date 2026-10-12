@@ -11,7 +11,7 @@
 // march 门〔WATER_SSR_MIN_FRESNEL〕已按反馈移除〔2026-10，见 surface.glsl 反射段注〕）；命中段雾 = lib/water/reflection.glsl
 // 的 waterReflectionHitFog（命中色雾化在反射侧完成，本文件只管追踪）。
 // 依赖由接入的 program 先行 include（lib 文件不嵌套）：constants.glsl（WATER_SSR_* /
-// TAA_HAND_DEPTH / TAAU 的 RENDER_SCALE）、uniforms.glsl（depthtex1 / gbufferProjection /
+// TAA_HAND_DEPTH / TAAU 的 EFFECTIVE_RENDER_SCALE）、uniforms.glsl（depthtex1 / gbufferProjection /
 // viewWidth / viewHeight）、utils/noise.glsl（temporalBayer64 / applyJitter /
 // applyInverseJitter——方向一致性验证的碰撞点去抖基底）、utils/space.glsl
 //（screenToViewCanonical——方向一致性验证的碰撞点重建，2026-10 起）
@@ -161,7 +161,7 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
 
     // ---- TAAU / SR_UPSCALE 子区域（无两者时即全屏 [0,1]²，顺带清 jitter 越界的半纹素尾差）alpha 域裁剪 ----
 #if defined(TAAU) || defined(SR_UPSCALE)
-    vec2 limit = vec2(RENDER_SCALE);
+    vec2 limit = vec2(EFFECTIVE_RENDER_SCALE);
 #else
     vec2 limit = vec2(1.0);
 #endif
@@ -177,7 +177,7 @@ bool waterSSR(vec3 viewPos, vec3 reflDirView, float distWorld, vec3 faceNormalW,
     // ---- 可见段重定基 + 均匀像素步进参数（春雷 traceFullScreen 同式：不限步数走完可见段）。
     // 步距随视口最短边等比定标（WATER_SSR_SHORT_EDGE_STEPS 单一整体旋钮，1080p → 27 px/步）
     // ⇒ 可见段长度与步距同随分辨率缩放，最坏步数 ≈ 对角线 ÷ 最短边 × 本值 ≈ 2.3 × 40 ≈ 92
-    //（TAAU 子区域段更短、再 × RENDER_SCALE），与分辨率无关 ----
+    //（子区域段更短、再 × EFFECTIVE_RENDER_SCALE），与分辨率无关 ----
     vec3 sa = mix(s0, s1, aEnter);
     vec3 sb = mix(s0, s1, aExit);
     // march 域换 buffer 像素域（2026-10 性能）：端点一次 ×viewport，每步 mix 直出 texelFetch 的

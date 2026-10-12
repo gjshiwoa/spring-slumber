@@ -61,7 +61,7 @@
 // WATER_FOG 宏分区 / WATER_GLINT_* / WATER_REFL_SKY_GATE_* / WATER_UW_REFL_* /
 // WATER_BG_SNAPSHOT_HEADROOM〔解码系数在 vsh〕 /
 // DIRECT_SKYLIGHT_GATE_* / SHADOW_BIAS_* / DIM_NO_SHADOW / DIM_NO_DIRECT_LIGHT / TAAU 的
-// RENDER_SCALE）、uniforms.glsl（depthtex1 / gaux1〔背景快照〕/ shadowtex1 / 视口 / far /
+// EFFECTIVE_RENDER_SCALE）、uniforms.glsl（depthtex1 / gaux1〔背景快照〕/ shadowtex1 / 视口 / far /
 // shadowDistance / shadowMapResolution / cameraPosition / isEyeInWater / gbufferProjection /
 // gbufferModelView(Inverse)）、utils/color.glsl（srgbToLinear）、utils/noise.glsl
 //（applyInverseJitter 参数版——去抖 / 折射 / 命中点的位置重建基底）、utils/space.glsl
@@ -245,7 +245,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 距离衰减防远水拉扯；采样位钳在渲染子区域内（TAAU / SR_UPSCALE 区域外是上帧全屏残留）----
     vec2 viewSize = vec2(viewWidth, viewHeight);
 #if defined(TAAU) || defined(SR_UPSCALE)
-    vec2 regionMax = ceil(viewSize * RENDER_SCALE) - 1.5;
+    vec2 regionMax = ceil(viewSize * EFFECTIVE_RENDER_SCALE) - 1.5;
 #else
     vec2 regionMax = viewSize - 1.5;
 #endif

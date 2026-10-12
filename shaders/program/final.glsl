@@ -20,9 +20,15 @@
 // ±1px 邻域近似恒定，中心一次采样供 5-tap 共享——泛光不参与锐化、亦省 4 次 bloom fetch。
 // lobe → 0（RCAS_SHARPNESS 调大）时输出逐位退化回接入 RCAS 前的直通链
 //
+// SR 超分接管（SR_UPSCALE，constants.glsl）时整段编译剔除：RCAS 是给内置 TAA / TAAU 时间累积
+// 软感补的末级锐化，而 FSR2 / DLSS / XeSS 算法族自带锐化输出，再叠 RCAS 会双重锐化过冲；此时
+// final 读到的 colortex6 已是 SR 全屏超分稳定图像、不再有「子区域低分辨率软感」要补。跳过用
+// 消费点条件而非 constants.glsl 的 #undef——旧版 OptiFine 扫描器对失活分支也执行 #undef，会把
+// 用户选项 RCAS 从设置里抹掉（引擎输出指令同理只查外部注入宏，见 constants.glsl SR 段）
+//
 // 性能（二次优化，按反馈）：① **天空像素整段跳过**——depthtex0 ≥ 1 门控（天空 LUT / 云平滑，
 // RCAS 在彼处近似 no-op），户外 30~50% 像素免 4 次邻域 fetch 与 lobe 统计；**TAAU 下取 depth 前
-// 须 pixel × RENDER_SCALE 映射回渲染域**——final 全屏 vs depth 渲染子区域，子区域外是每帧 clear
+// 须 pixel × EFFECTIVE_RENDER_SCALE 映射回渲染域**——final 全屏 vs depth 渲染子区域，子区域外是每帧 clear
 // 值 1.0，直取会把顶部 / 右侧 1−S 带整带误判天空（该带为上采样出的正常画面内容）；取 depthtex0
 // 而非 tex1：雨 / 手等最终图像内容在 tex0、属锐化受益对象（texelFetch 无隐式导数，分支内采样安全）；
 //已知取舍：云 / 日盘边像素同在天空气分支、不被锐化（云走柔和风格，观感不合意则去门控）。② 总开关宏
@@ -72,10 +78,10 @@ void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     vec3 color = (texelFetch(colortex6, pixel, 0).rgb + bloom) * vExposure;
 
-#ifdef RCAS
-    // 天空门控见文件头：几何像素才锐化（分支内 texelFetch 无隐式导数、安全）
-#if defined(TAAU) || defined(SR_UPSCALE)
-    ivec2 depthPixel = ivec2(vec2(pixel) * RENDER_SCALE); // 屏幕域 → 渲染子区域（子区域外 depth 为 clear 值）
+#if defined(RCAS) && !defined(SR_UPSCALE)
+    // SR 接管时整段剔除（见文件头）；天空门控：几何像素才锐化（分支内 texelFetch 无隐式导数、安全）
+#ifdef TAAU
+    ivec2 depthPixel = ivec2(vec2(pixel) * EFFECTIVE_RENDER_SCALE); // 屏幕域 → 渲染子区域（子区域外 depth 为 clear 值；SR 下无 RCAS、无需映射）
 #else
     ivec2 depthPixel = pixel;
 #endif

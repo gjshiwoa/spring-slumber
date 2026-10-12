@@ -419,7 +419,10 @@ const float COLOR_CONTRAST_PIVOT = 0.18; // 对比度枢轴 = 线性域中灰（
 // ---- RCAS（lib/common/utils/filters.glsl rcasLobe + final 锐化，春雷同款：FSR1 Robust CAS）----
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离（TAAU 同纪律）
 // RCAS 总开关（游戏内设置）：删本行 = final 的 RCAS 段整体编译剔除（含 depth 与 4 次邻域 fetch）、
-// 逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本开关
+// 逐位回退接入前管线——调大 RCAS_SHARPNESS 只压增益不省采样，低配关闭用本开关；
+// SR 超分接管（SR_UPSCALE）时 final 侧消费点条件自动跳过（SR 算法族自带锐化、RCAS 是给内置
+// TAA/TAAU 软感补的末级锐化，叠加过锐——跳过在 final.glsl 消费点而非本处 #undef：旧版 OptiFine
+// 扫描器对失活分支也执行 #undef、会把本用户选项从设置里抹掉）；SR 生效期间本开关与档位不生效
 #define RCAS
 #ifdef RCAS
 // 锐化档位（stops）：0.0 最锐、每 +1.0 增益减半——TAA / TAAU 时间累积软感的末级补锐；
@@ -537,31 +540,44 @@ const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档
 // ---- SR 超分模组接管（配置 = shaders/superresolution.v3.json，Schema V3；接口文档
 //      sr.187j3x1-114514.org——仅 Iris + SR mod + 配置有效时注入下列宏，未装 / 用户关闭 = 全部未定义）----
 // SR_UPSCALE 为本包侧总门（一切 SR 专属代码的唯一开关；删除接入时回收本段 + superresolution.v3.json）。
-// 接管三件事：
-//   ① 渲染比例：RENDER_SCALE 重定义为 SR 的 SR_RENDER_SCALE_FACTOR（编译期宏，比例档切换触发
-//      热重载；「无手抖动档位不更新」的 SR_SCALED_WIDTH 族禁止进 shaders.properties / 代码）。
-//      TAAU 的子区域机制（applyTAAJitter 缩放 / outsideRenderRegion / FULLSCREEN_RENDER_REGION /
-//      final 深度映射 / SSR 域界）门控由 #ifdef TAAU 放行为「TAAU || SR_UPSCALE」——TAAU 关闭 +
-//      SR 开启时子区域机制照常工作；游戏内 RENDER_SCALE 选项在 SR 生效期间被覆盖（改档无效，调 SR 侧）
+// 接管四件事：
+//   ① 渲染比例：派生 EFFECTIVE_RENDER_SCALE（SR 接管 = SR 的 SR_RENDER_SCALE_FACTOR〔编译期宏，
+//      比例档切换触发热重载〕、否则镜像内置 TAAU 的 RENDER_SCALE 选项值），子区域机制消费点
+//      （applyTAAJitter 缩放 / applyJitter / applyInverseJitter / outsideRenderRegion /
+//      FULLSCREEN_RENDER_REGION / 材质 mip 梯度 / TAAU 重建 / water 折射 regionMax / SSR 域界）
+//      统一消费派生名——**不再 #undef / 重定义 RENDER_SCALE 本名**（2026-10-12 低版本修复：旧版
+//      OptiFine 选项扫描器对失活分支也执行 #undef/#define，无 SR 时也会把 RENDER_SCALE 选项的
+//      值跟踪 / 改值行绑定劫持到 SR 行上——游戏内调 RENDER_SCALE 无效的根源；现选项本名只出现在
+//      唯一的选项 #define 行，扫描器无从改错行）；「无手抖动档位不更新」的 SR_SCALED_WIDTH 族
+//      禁止进 shaders.properties / 代码（EFFECTIVE_RENDER_SCALE 亦非选项、不进）。TAAU 门控放行为
+//      「TAAU || SR_UPSCALE」——TAAU 关闭 + SR 开启时子区域机制照常工作（final 深度映射原在此列、
+//      2026-10 起随 RCAS 在 SR 下整段剔除而回到纯 #ifdef TAAU，见下方 ④）；游戏内 RENDER_SCALE
+//      选项在 SR 生效期间被 EFFECTIVE 旁路（改档无效，调 SR 侧）
 //   ② jitter：noise.glsl 的 taaJitterSample 换用 SRJitterOffset uniform（mod 生成的相位序列，
 //      与 Halton 表同一「渲染分辨率像素域」约定，applyTAAJitter / vJitter 全链自动跟进）。算法不
 //      支持 jitter 时该 uniform = 0 = 不抖（此时本包 TAA 已旁路、自抖无解析端，宁可不抖）
 //   ③ 抗锯齿 / 上采样：SR 算法族（FSR2 / DLSS / XeSS…）自带时域累积，composite_taa（composite3）
 //      整 pass 透传旁路（colortex3 历史停写）；SR 在 composite3 前触发点读 colortex6（雾后线性
 //      HDR）+ noTranslucentDepthtex + colortex31 运动矢量、写回全屏 upscaled 色彩
+//   ④ 末级锐化：final 的 RCAS 段在消费点条件跳过（SR 算法族自带锐化，RCAS 是给内置 TAA/TAAU
+//      软感补的末级锐化、叠加过锐）——RCAS 宏本身不动（用户选项，跳过位置与缘由见其段注释）
 // 运动矢量（写入端见 deferred_init / gbuffers_opaque_entities，取值实现 space.glsl 的
 //   srSceneMotionVector / srEntityMotionVector）：colortex31 由 deferred_init（三维度共用的
 //   deferred1 入口）写「相机重投影」底层 + gbuffers_entities 的 at_velocity 实体层（b 标记读回
 //   保留）；用户关闭 SR 的 Iris at_velocity 扩展时 SR_ENTITY_VELOCITY 不定义、实体走相机 MV
 #if defined(SR_INSTALLED) && defined(SR_SHOULD_APPLY_SCALE) && SR_SHOULD_APPLY_SCALE == 1
 #define SR_UPSCALE
-#ifdef RENDER_SCALE
-#undef RENDER_SCALE
-#endif
-#define RENDER_SCALE SR_RENDER_SCALE_FACTOR
 #endif
 #if defined(SR_UPSCALE) && defined(SR_IRIS_EXT_VELOCITY) && SR_IRIS_EXT_VELOCITY == 1
 #define SR_ENTITY_VELOCITY
+#endif
+// 生效渲染比例：子区域机制全链消费的派生宏（非选项、不进 shaders.properties）。SR 接管 = SR 档位；
+// 否则镜像 RENDER_SCALE 选项值（TAAU 删宏时选项行随之消失、本宏不定义——消费点全在
+//「TAAU || SR_UPSCALE」门内，未定义即无消费，任何漏网引用会在编译期暴露）
+#ifdef SR_UPSCALE
+#define EFFECTIVE_RENDER_SCALE SR_RENDER_SCALE_FACTOR
+#elif defined(TAAU)
+#define EFFECTIVE_RENDER_SCALE RENDER_SCALE
 #endif
 
 // ---- 光照（lib/lighting/lighting.glsl，直接光物理化——春雷 shading.glsl 同构）----
@@ -886,7 +902,7 @@ const float WATER_REFL_SKY_GATE_LOW   = 0.1;  // 重映射下界：低于此天�
 const float WATER_REFL_SKY_GATE_GAMMA = 2.2;  // 感知域 → 线性域幂（srgbToLinear 同值）
 // SSR = 2D SSPT 屏幕域 march（春雷 sstTrace 移植，机制见 lib/water/ssr.glsl「屏幕空间反射」段）
 // 2026-10-07：步距减半（20 → 40）实测改善反射发虚，保留密度并优化精修重复读取 / 无效验证。
-const float WATER_SSR_SHORT_EDGE_STEPS = 40.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 视口最短边 ÷ 本值——1080p 基准 → 27 px/步（旧 20 档为 54 px/步；角度自适应见下方开关）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 92（TAAU 子区域段更短、再 × RENDER_SCALE），与分辨率无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
+const float WATER_SSR_SHORT_EDGE_STEPS = 40.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 视口最短边 ÷ 本值——1080p 基准 → 27 px/步（旧 20 档为 54 px/步；角度自适应见下方开关）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 92（子区域段更短、再 × EFFECTIVE_RENDER_SCALE），与分辨率无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
 // 角度自适应步距 A/B（2026-10-07）：掠视保持基准，较正视最多放粗 25%。
 // 角度只用调用方的稳定面法线；不依赖动画波面法线，避免步距随波场逐帧摆动。
 // 注释开关只关闭角度自适应；与短段最低采样开关均关闭时回固定 40 档。仅源码诊断，不列设置。

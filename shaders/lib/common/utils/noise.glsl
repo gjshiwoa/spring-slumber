@@ -1,7 +1,7 @@
 // 噪声 / 抖动 / TAA jitter 工具（通用，与具体效果解耦）
 // 依赖由接入的 program 先行 include（lib 文件不嵌套 include）：
 //   lib/common/globals/constants.glsl（GOLDEN_RATIO / TAA_JITTER_SAMPLES / TAA_JITTER_SCALE /
-//     TAAU 开启时的 RENDER_SCALE）、
+//     子区域机制开启时的 EFFECTIVE_RENDER_SCALE）、
 //   lib/common/globals/uniforms.glsl（frameCounter / viewWidth / viewHeight）
 #ifndef LIB_NOISE_GLSL
 #define LIB_NOISE_GLSL
@@ -130,7 +130,7 @@ vec2 taaJitterUV() {
 // 解析端（composite_taa）的去抖补偿须在同一 buffer 纹素域等量施加，见 taa.glsl
 vec4 applyTAAJitter(vec4 clipPos) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    clipPos.xy = clipPos.xy * RENDER_SCALE + (RENDER_SCALE - 1.0) * clipPos.w;
+    clipPos.xy = clipPos.xy * EFFECTIVE_RENDER_SCALE + (EFFECTIVE_RENDER_SCALE - 1.0) * clipPos.w;
 #endif
     clipPos.xy += taaJitterSample() * (2.0 / vec2(viewWidth, viewHeight)) * clipPos.w;
     return clipPos;
@@ -144,7 +144,7 @@ vec4 applyTAAJitter(vec4 clipPos) {
 // 2026-10 起〕；applyInverseJitter 的 jitter 参数版 = 各 pass 位置重建基底（见函数注）
 vec2 applyJitter(vec2 uv) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    uv *= RENDER_SCALE;
+    uv *= EFFECTIVE_RENDER_SCALE;
 #endif
     return uv + taaJitterUV();
 }
@@ -157,7 +157,7 @@ vec2 applyJitter(vec2 uv) {
 //（SR 接管时 S / jitter 两源均由 SR 供给，本函数域约定不变）
 vec2 applyInverseJitter(vec2 uv, vec2 jitterUv) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    return (uv - jitterUv) / RENDER_SCALE;
+    return (uv - jitterUv) / EFFECTIVE_RENDER_SCALE;
 #else
     return uv - jitterUv;
 #endif
@@ -178,7 +178,7 @@ vec2 applyInverseJitter(vec2 uv) {
 #ifdef STAGE_FRAGMENT
 bool outsideRenderRegion() {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    vec2 limit = ceil(vec2(viewWidth, viewHeight) * RENDER_SCALE) + 1.0;
+    vec2 limit = ceil(vec2(viewWidth, viewHeight) * EFFECTIVE_RENDER_SCALE) + 1.0;
     return any(greaterThan(gl_FragCoord.xy, limit)) || any(lessThan(gl_FragCoord.xy, vec2(-1.0)));
 #else
     return false;
