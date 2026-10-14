@@ -34,6 +34,7 @@
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/compat/voxy/scene.glsl"
 #include "/lib/common/utils/filters.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
@@ -77,20 +78,36 @@ void main() {
     // 保留原 0.01 雨强守卫；严格 < 门槛才排除，等于门槛仍参与。
     if (rainStrength <= 0.01 || rainStrength < WET_SSR_MIN_WETNESS) return;
     float depth = texelFetch(depthtex1, pixel, 0).r;
-    if (depth >= 1.0 || depth < TAA_HAND_DEPTH) return;
+    if (depth < TAA_HAND_DEPTH) return;
+#ifdef VOXY
+    vec2 uv = applyInverseJitter(gl_FragCoord.xy / vec2(viewWidth, viewHeight), vJitter);
+    vec3 viewPos = screenToViewCanonical(uv, depth);
+    bool lodSurface;
+    if (!voxyScenePosition(gl_FragCoord.xy, vJitter, depth, false, viewPos, lodSurface)) return;
+    float frontDepth = texelFetch(depthtex0, pixel, 0).r;
+    if (frontDepth < 1.0 && frontDepth < depth - 1e-6 &&
+        screenToViewCanonical(uv, frontDepth).z > viewPos.z) return;
+#else
+    if (depth >= 1.0) return;
     if (texelFetch(depthtex0, pixel, 0).r < depth - 1e-6) return;
+#endif
 
     vec4 gNormalLm = texelFetch(colortex5, pixel, 0);
     float wetSkyGate = terrainWetnessSkyGate(gNormalLm.a);
     // 露天上界先于法线解包 / 位置重建，弱天光像素无需采水坑噪声。
     if (wetSkyGate * rainStrength < WET_SSR_MIN_WETNESS) return;
     vec3 normalWorld = mat3(gbufferModelViewInverse) * decodeOctahedral(gNormalLm.rg);
+#ifdef VOXY
+    if (lodSurface) normalWorld = mat3(vxModelViewInv) * decodeOctahedral(gNormalLm.rg);
+#endif
     float wetGate = wetSkyGate * terrainWetnessUpGate(normalWorld.y);
     if (wetGate * rainStrength < WET_SSR_MIN_WETNESS) return;
 
-    // 去抖基底与 deferred_init 同式；复用已有典则透视闭式重建。
+    // 原版档仍在湿度门之后重建；Voxy 档已用真实位置完成前景遮挡比较。
+#ifndef VOXY
     vec2 uv = applyInverseJitter(gl_FragCoord.xy / vec2(viewWidth, viewHeight), vJitter);
     vec3 viewPos = screenToViewCanonical(uv, depth);
+#endif
     vec3 relWorld = viewToRelativeWorld(viewPos);
     float wet = terrainWetnessFromGate(relWorld.xz + cameraPosition.xz, wetGate);
     // 只看湿度，不引入 Fresnel 门槛，避免脚下硬边干圈；gbuffer 微潮不受此门影响。
@@ -127,7 +144,7 @@ void main() {
         reflColor = textureLod(colortex6, hitUv, 0.0).rgb;
         // 命中段雾：距离 = 眼→表面 + 表面→命中点折线全长（waterReflectionHitFog
         // 内部语义）；hitUv 为 buffer 域、深度取 march 门控同一纹素
-        vec3 hitViewPos = screenToViewCanonical(applyInverseJitter(hitUv, vJitter), hitDepth);
+        vec3 hitViewPos = waterSsrViewPosition(hitUv, hitDepth, vJitter);
         waterReflectionHitFog(reflColor, viewPos, relWorld.y + cameraPosition.y, hitViewPos,
                               lm, vSunDirection, vMoonDirection, vHorizon,
                               vSkyLutValid > 0.5, vDirectIrradiance * skyGate, vSkyAmbient);

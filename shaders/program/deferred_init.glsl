@@ -43,13 +43,14 @@
 #define FULLSCREEN_DIRECT_TRANSMITTANCE
 
 #include "/lib/common/globals/constants.glsl"
-#include "/lib/common/utils/color.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/packing.glsl"
-#include "/lib/common/pipeline/gbuffer_data.glsl"
+#include "/lib/common/utils/color.glsl"
+#include "/lib/common/utils/filters.glsl"
 #include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
-#include "/lib/common/utils/filters.glsl"
+#include "/lib/common/pipeline/gbuffer_data.glsl"
+#include "/lib/compat/voxy/scene.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
@@ -99,11 +100,18 @@ layout(location = 2) out vec4 outMisc;  // colortex7：pass 顺序标记写 1 + 
 layout(location = 3) out vec4 outMotion; // colortex31：SR 运动矢量（相机重投影底层，实体层读回保留——见文件头）
 #endif
 
+
 void main() {
     // 几何信息（depthtex1 / colortex4/5）texelFetch 精确纹素读取——不插值、无 vTexCoord
     //（全屏 pass 逐像素与缓冲一一对应，与 composite_taa 的锚点采样同款纪律）
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     float depth = texelFetch(depthtex1, pixel, 0).r;
+#ifdef VOXY
+    // LOD 材质标记决定位置 / 法线来源；depthtex1 不再包含 LOD 深度。
+    vec4 lodMaterial = texelFetch(colortex4, pixel, 0);
+    vec4 lodAlbedo = unpack2x16To4x8(lodMaterial.rg);
+    bool lodSurface = isLodMaterialMarker(lodAlbedo.a);
+#endif
 
     // 统一去抖 uv：gl_FragCoord 像素中心 uv − 当前帧 jitter（与几何抖动同相位），天空视线与几何
     // viewPos 共用的位置重建基底。TAAU：本 pass quad 已缩进左下 [0,S]² 子区域，gl_FragCoord/视口
@@ -111,8 +119,19 @@ void main() {
     // noise.glsl 的 applyInverseJitter 参数版——vJitter varying 传入免每像素 Halton 表重算）
     vec2 uv = applyInverseJitter(gl_FragCoord.xy / vec2(viewWidth, viewHeight), vJitter);
 
+#ifdef VOXY
+    vec3 surfaceViewPos = vec3(0.0);
+    bool lodPositionValid = false;
+    if (lodSurface) {
+        lodPositionValid = voxyDepthViewPosition(vxDepthTexOpaque, gl_FragCoord.xy, vJitter, surfaceViewPos);
+    }
+#endif
     vec3 color;
-    if (depth >= 1.0) {
+    bool skyPixel = depth >= 1.0;
+#ifdef VOXY
+    skyPixel = skyPixel && !lodSurface;
+#endif
+    if (skyPixel) {
 #ifdef DIM_NO_ATMOSPHERE
         // 维度极简档（下界 / 末地，2026-10 接入）：天空像素 = 常量维度天色（constants.glsl 的
         // DIMENSION_SKY_COLOR，waterSkyReflection 的 miss 回退同源）——sky-view LUT / 日月盘 /
@@ -162,16 +181,42 @@ void main() {
         // 几何光照：colortex4.rg 解包 albedo（sRGB 反 gamma；a 通道为标记位）、colortex4.ba 解包
         // labPBR 高光贴图（直射 GGX 高光消费，同 texel 零新增 fetch），colortex5.rg 八面体
         // 法线、.ba 原始 lmcoord 重映射；viewPos = 去抖 uv + 本像素原始深度
+#ifdef VOXY
+        vec4 gAlbedoSpec = lodMaterial;
+#else
         vec4 gAlbedoSpec = texelFetch(colortex4, pixel, 0);
+#endif
         vec4 gNormalLm = texelFetch(colortex5, pixel, 0);
+#ifdef VOXY
+        vec4 gAlbedo = lodAlbedo;
+#else
         vec4 gAlbedo = unpack2x16To4x8(gAlbedoSpec.rg);
+#endif
         vec3 albedo = srgbToLinear(gAlbedo.rgb);
         float sssStrength = materialSSSStrength(gAlbedo.a);
         vec3 normalView = decodeOctahedral(gNormalLm.rg);
+#ifdef VOXY
+        if (lodSurface)
+            normalView = normalize(mat3(gbufferModelView) * (mat3(vxModelViewInv) * normalView));
+#endif
         vec2 lm = remapLightmap(gNormalLm.ba);
-        vec3 viewPos = screenToView(vec3(uv, depth));
-        color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance, sssStrength,
-                             unpack2x16To4x8(gAlbedoSpec.ba));
+#ifdef VOXY
+        // Missing depth cannot provide a surface position for shadowing.
+        // Preserve valid LOD color with lightmap shading in that case.
+        if (lodSurface && !lodPositionValid) {
+            color = forwardLightmapShade(albedo, lm, vSkyAmbient);
+        } else
+#endif
+        {
+#ifdef VOXY
+            // LOD 已完成独立深度重建，免算随后被覆盖的原版位置。
+            vec3 viewPos = lodPositionValid ? surfaceViewPos : screenToView(vec3(uv, depth));
+#else
+            vec3 viewPos = screenToView(vec3(uv, depth));
+#endif
+            color = shadeSurface(albedo, normalView, lm, viewPos, vDirectTransmittance, sssStrength,
+                                 unpack2x16To4x8(gAlbedoSpec.ba));
+        }
 
         // ---- 调试：物品标记可视化（红 = 植被（block.properties 显式列表）、原色 = 未标记；
         // 块注释停用，恢复时去掉 /* 与 */ 两行）----
@@ -191,7 +236,11 @@ void main() {
     // 不采样未绑定的 SR 资源名；b = 1 保留本帧实体 MV，其余写相机 MV。
     vec4 entityMotion = texelFetch(colortex31, pixel, 0);
     outMotion = entityMotion.b > 0.5 ? entityMotion
-              : vec4(srSceneMotionVector(uv, depth), 0.0, 1.0);
+              : vec4(
+#ifdef VOXY
+                  lodPositionValid ? voxySceneMotionVector(uv, surfaceViewPos) :
+#endif
+                  srSceneMotionVector(uv, depth), 0.0, 1.0);
 #endif
 
     // 背景快照（colortex4）：编码 = 场景色 × 曝光 ÷ HEADROOM 进 [0,1]（RGBA16），water 经 gaux1

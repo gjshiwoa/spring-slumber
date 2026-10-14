@@ -62,8 +62,9 @@ void main() {
     // 子区域；vTexCoord 同步缩为子区域物理 uv（fsh 走 texelFetch(gl_FragCoord) 不消费 vTexCoord，缩放仅保持
     // 语义一致）。宏由 world0/deferred1 与 world0/composite2 入口定义；composite_taa / final 不定义、
     // quad 全屏（SR 接管时 composite3 透传 SR 已写回的全屏 upscaled 色彩，同样保持全屏 quad）
-    gl_Position.xy = gl_Position.xy * EFFECTIVE_RENDER_SCALE + (EFFECTIVE_RENDER_SCALE - 1.0) * gl_Position.w;
-    vTexCoord *= EFFECTIVE_RENDER_SCALE;
+    vec2 regionScale = renderRegionScale();
+    gl_Position.xy = gl_Position.xy * regionScale + (regionScale - 1.0) * gl_Position.w;
+    vTexCoord *= regionScale;
 #endif
     vJitter = taaJitterUV();
 

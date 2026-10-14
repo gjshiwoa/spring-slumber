@@ -106,7 +106,7 @@ float simplex2d(vec2 p) {
 // 由 gbuffer 类 program 的 vsh 与通用全屏 vsh（program/fullscreen_vsh.glsl，其 vJitter 即
 // taaJitterUV 的 vsh 侧一次算好）按需平铺引入
 
-// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 32 相位查表）。
+// 当前帧抖动相位（像素域 [-0.5, 0.5] × TAA_JITTER_SCALE，Halton(2,3) 8 相位查表）。
 // SR 超分接管时（SR_UPSCALE，constants.glsl）换用 SR mod 的 SRJitterOffset（mod 生成的相位
 // 序列、渲染分辨率像素域 = 本函数的像素域约定）——下游 applyTAAJitter / applyJitter / vJitter
 // 全链自动跟进；算法不支持 jitter 时该 uniform 恒 0 = 不抖（本包 TAA 已旁路，自抖无解析端）
@@ -114,7 +114,30 @@ vec2 taaJitterSample() {
 #ifdef SR_UPSCALE
     return SRJitterOffset;
 #else
-    return TAA_JITTER_SAMPLES[frameCounter & 31] * TAA_JITTER_SCALE;
+    return TAA_JITTER_SAMPLES[frameCounter & 7] * TAA_JITTER_SCALE;
+#endif
+}
+
+// 渲染区域逐轴比例。SR 的尺寸由模组按整数截断，不能用名义比例重建像素网格：
+// 平衡 / 质量档的宽高余数不同；投影、去抖、深度、运动矢量必须共享实际尺寸。
+// TAAU 保持既有比例；无超分返回全视口。依赖 uniforms.glsl（先于本文件平铺引入）。
+vec2 renderRegionSize() {
+#ifdef SR_UPSCALE
+    return max(SRScaledViewportSize, vec2(1.0));
+#elif defined(TAAU)
+    return vec2(viewWidth, viewHeight) * EFFECTIVE_RENDER_SCALE;
+#else
+    return vec2(viewWidth, viewHeight);
+#endif
+}
+
+vec2 renderRegionScale() {
+#ifdef SR_UPSCALE
+    return renderRegionSize() / vec2(viewWidth, viewHeight);
+#elif defined(TAAU)
+    return vec2(EFFECTIVE_RENDER_SCALE);
+#else
+    return vec2(1.0);
 #endif
 }
 
@@ -130,7 +153,8 @@ vec2 taaJitterUV() {
 // 解析端（composite_taa）的去抖补偿须在同一 buffer 纹素域等量施加，见 taa.glsl
 vec4 applyTAAJitter(vec4 clipPos) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    clipPos.xy = clipPos.xy * EFFECTIVE_RENDER_SCALE + (EFFECTIVE_RENDER_SCALE - 1.0) * clipPos.w;
+    vec2 regionScale = renderRegionScale();
+    clipPos.xy = clipPos.xy * regionScale + (regionScale - 1.0) * clipPos.w;
 #endif
     clipPos.xy += taaJitterSample() * (2.0 / vec2(viewWidth, viewHeight)) * clipPos.w;
     return clipPos;
@@ -144,7 +168,7 @@ vec4 applyTAAJitter(vec4 clipPos) {
 // 2026-10 起〕；applyInverseJitter 的 jitter 参数版 = 各 pass 位置重建基底（见函数注）
 vec2 applyJitter(vec2 uv) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    uv *= EFFECTIVE_RENDER_SCALE;
+    uv *= renderRegionScale();
 #endif
     return uv + taaJitterUV();
 }
@@ -157,7 +181,7 @@ vec2 applyJitter(vec2 uv) {
 //（SR 接管时 S / jitter 两源均由 SR 供给，本函数域约定不变）
 vec2 applyInverseJitter(vec2 uv, vec2 jitterUv) {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    return (uv - jitterUv) / EFFECTIVE_RENDER_SCALE;
+    return (uv - jitterUv) / renderRegionScale();
 #else
     return uv - jitterUv;
 #endif
@@ -178,7 +202,7 @@ vec2 applyInverseJitter(vec2 uv) {
 #ifdef STAGE_FRAGMENT
 bool outsideRenderRegion() {
 #if defined(TAAU) || defined(SR_UPSCALE)
-    vec2 limit = ceil(vec2(viewWidth, viewHeight) * EFFECTIVE_RENDER_SCALE) + 1.0;
+    vec2 limit = ceil(renderRegionSize()) + 1.0;
     return any(greaterThan(gl_FragCoord.xy, limit)) || any(lessThan(gl_FragCoord.xy, vec2(-1.0)));
 #else
     return false;

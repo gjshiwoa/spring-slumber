@@ -18,11 +18,13 @@
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"
-#include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
-#include "/lib/common/pipeline/material_texture.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
+#include "/lib/common/pipeline/gbuffer_data.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
@@ -47,9 +49,10 @@ void main() {
     if (color.a < CUTOUT_REF) discard; // cutout 透贴（引擎参考值钳制，constants.glsl 的 CUTOUT_REF）
 
     // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）；
-    // 合成只作用于 rgb——物品标记不参与混合，a 通道整像素置空
+    // 合成只作用于 rgb；原版标记置空，Voxy 保留背景来源供 deferred 位置适配。
     vec4 previous = texelFetch(gaux1, ivec2(gl_FragCoord.xy), 0);
-    vec3 previousColor = unpack2x16To4x8(previous.rg).rgb;
+    vec4 previousAlbedo = unpack2x16To4x8(previous.rg);
+    vec3 previousColor = previousAlbedo.rgb;
 #ifdef MANUAL_COMPOSITE_ADDITIVE
     // 加色档：往背景 albedo 上加光（原版 srcAlpha/ONE 的近似，两族见头注）
     color.rgb = min(previousColor + color.rgb * color.a, 1.0);
@@ -57,7 +60,8 @@ void main() {
     color.rgb = mix(previousColor, color.rgb, color.a);
 #endif
 
-    outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), previous.ba);
+    float marker = compositedMaterialMarker(previousAlbedo.a);
+    outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, marker)), previous.ba);
 }
 
 #endif

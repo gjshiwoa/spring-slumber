@@ -49,6 +49,7 @@
 #include "/lib/common/pipeline/gbuffer_data.glsl"
 #include "/lib/common/pipeline/pass_order_marker.glsl"
 #include "/lib/common/utils/space.glsl"
+#include "/lib/compat/voxy/scene.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
 #include "/lib/atmosphere/sky.glsl"
 #include "/lib/atmosphere/aerial.glsl"

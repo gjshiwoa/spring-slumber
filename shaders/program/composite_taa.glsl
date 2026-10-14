@@ -1,6 +1,7 @@
 // TAA 解析 pass: composite_taa（composite3 入口；vsh = 通用全屏 vsh，本 program 无自定义 vsh 段，
 // fsh 按需声明同名 in）。位于全部 gbuffers（含 deferred 后的前向半透明）之后、bloom 链之前：
 // 读抖动后的线性 colortex6 与 depthtex0，重投影采 colortex3 历史、九样本重建 / 软方差修正 + 独立解遮挡混合后写回
+// VOXY 时锚点合并原版 depthtex0 与专属 LOD 深度、保留各自矩阵重建的位置；输出仍为
 // colortex6（TAAU 时为上采样后的全屏目标分辨率，机制见 lib/post/taa.glsl），混合色 + 本帧锚点
 // 线性深度写 colortex3 供下帧（DRAWBUFFERS:63 单程序独占 ping-pong，不依赖 flip.*）；bloom 图集
 // 与自动曝光测光自此吃抗锯齿后的稳定图像。TAAU 下 quad 保持全屏——本 pass 是上采样器，与缩进
@@ -23,6 +24,7 @@
 #include "/lib/common/utils/space.glsl"
 #include "/lib/post/bloom.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/compat/voxy/scene.glsl"
 #include "/lib/post/exposure.glsl"
 #include "/lib/lighting/ambient.glsl"
 #include "/program/fullscreen_vsh.glsl"

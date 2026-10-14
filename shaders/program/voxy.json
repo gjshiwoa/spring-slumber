@@ -1,0 +1,27 @@
+{
+    "version": 1,
+    "taaOffset": "
+{
+#include "/program/voxy_taa.glsl"
+}
+",
+    "excludeLodsFromVanillaDepth": true,
+    "useViewportDims": true,
+    "renderScale": [
+#if defined(EFFECTIVE_RENDER_SCALE)
+        EFFECTIVE_RENDER_SCALE
+#else
+        1.0
+#endif
+    ],
+    "blending": {"-1": "off"},
+    "uniforms": [
+        "vxModelView", "frameCounter", "viewWidth", "viewHeight"
+#if defined(SR_INSTALLED) && defined(SR_SHOULD_APPLY_SCALE) && SR_SHOULD_APPLY_SCALE == 1
+        ,"voxyTaaJitter"
+#endif
+    ],
+    "samplers": {},
+    "opaqueDrawBuffers": [4,5],
+    "translucentDrawBuffers": [16,17]
+}

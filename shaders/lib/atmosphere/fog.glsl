@@ -57,6 +57,9 @@ void applyBoundaryFog(inout vec3 color, vec3 viewPos, bool skyPixel,
     if (isEyeInWater != 0) return; // 水下 / 熔岩中不雾（水下雾为扩展点）
 
     float boundaryDistance = max(far, 1.0);
+#ifdef VOXY
+    boundaryDistance = max(boundaryDistance, float(vxRenderDistance) * 16.0);
+#endif
     float distanceFactor = skyPixel ? 1.0 : smoothstep(boundaryDistance * BOUNDARY_FOG_START,
                                                        boundaryDistance * BOUNDARY_FOG_END,
                                                        length(viewPos));

@@ -7,10 +7,12 @@
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"
-#include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/pipeline/gbuffer_data.glsl"
 
 VARYING vec4 vColor;
 
@@ -27,12 +29,14 @@ void main() {
     if (outsideRenderRegion()) discard;
 
     // 与背景已写入的打包颜色手动合成（引擎混合已由 shaders.properties 关闭）；
-    // 合成只作用于 rgb——物品标记不参与混合，a 通道整像素置空
+    // 合成只作用于 rgb；原版标记置空，Voxy 保留背景来源供 deferred 位置适配。
     vec4 previous = texelFetch(gaux1, ivec2(gl_FragCoord.xy), 0);
-    vec3 previousColor = unpack2x16To4x8(previous.rg).rgb;
+    vec4 previousAlbedo = unpack2x16To4x8(previous.rg);
+    vec3 previousColor = previousAlbedo.rgb;
     vec3 color = mix(previousColor, vColor.rgb, vColor.a);
 
-    outMaterial = vec4(pack4x8To2x16(vec4(color, MATERIAL_NONE)), previous.ba);
+    float marker = compositedMaterialMarker(previousAlbedo.a);
+    outMaterial = vec4(pack4x8To2x16(vec4(color, marker)), previous.ba);
 }
 
 #endif

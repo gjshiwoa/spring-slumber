@@ -18,21 +18,22 @@
 // 天空像素不施加（不变式③）。另接入**水下雾**（WATER_FOG 宏，lib/water/fog.glsl 的
 // applyUnderwaterFog：isEyeInWater == 1 时按 depthtex0 表面距离的整屏吸收雾——与 gbuffers_water
 // 的水面框架同源、雾色光照共用单真源）。BOUNDARY_FOG / AERIAL_PERSPECTIVE / WATER_FOG **三宏全关**时
-// 整 pass 透传旁路——
+// 整 pass 透传旁路（末地恒走旁路，仅在输出处钳制负 RGB）——
 // colortex6 同位置 fetch 原样写回（不可 discard：读改写 pass 的输出经引擎 ping-pong 翻转进下一 pass，
 // 丢弃 = 翻转目标保持帧头 clear 黑 → 黑屏，机制见 main 内注释）；单关其一 = 该段编译剔除、另一段照常
 
 #include "/lib/common/globals/constants.glsl"
 #include "/lib/common/globals/uniforms.glsl"
-#include "/lib/common/utils/filters.glsl"
-#include "/lib/common/utils/color.glsl"
-#include "/lib/common/utils/space.glsl"
-#include "/lib/post/bloom.glsl"
-#include "/lib/common/utils/noise.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/color.glsl"
+#include "/lib/common/utils/filters.glsl"
+#include "/lib/common/utils/space.glsl"
+#include "/lib/common/utils/noise.glsl"
+#include "/lib/compat/voxy/scene.glsl"
+#include "/lib/post/bloom.glsl"
 #include "/lib/post/exposure.glsl"
-#include "/lib/lighting/ambient.glsl"
 #include "/lib/atmosphere/atmosphere.glsl"
+#include "/lib/lighting/ambient.glsl"
 #include "/lib/atmosphere/sky.glsl"
 #include "/lib/atmosphere/aerial.glsl"
 #include "/lib/atmosphere/fog.glsl"
@@ -45,7 +46,11 @@
 // ================================ FRAGMENT ================================
 #ifdef STAGE_FRAGMENT
 
+#if defined(VOXY) && defined(SR_INSTALLED) && defined(SR_SHOULD_APPLY_SCALE) && SR_SHOULD_APPLY_SCALE == 1
+/* RENDERTARGETS: 6,20,31 */
+#else
 /* DRAWBUFFERS:6 */
+#endif
 
 // 通用全屏 vsh 输出的帧数据——按需 in 声明（vJitter 与 deferred_init 同款消费：去抖基底
 // 「像素 uv − vJitter」，TAAU 再 /S）；getSkyColor 入参族（fog.glsl 雾色采样）；vDirectIrradiance /
@@ -60,12 +65,34 @@ flat in float vSkyLutValid; // 0/1（flat float——bool varying 不为补丁�
 
 layout(location = 0) out vec4 outColor; // colortex6：雾化后的场景颜色
 
+#if defined(VOXY) && defined(SR_UPSCALE)
+layout(location = 1) out vec4 outSrDepth;
+layout(location = 2) out vec4 outSrMotion;
+#endif
+
 void main() {
-#if !defined(BOUNDARY_FOG) && !defined(AERIAL_PERSPECTIVE) && !defined(WATER_FOG)
+#if defined(VOXY) && defined(SR_UPSCALE)
+    // Final SR inputs are produced after LOD transparency and vanilla forward draws.
+    // Keep opaque depth aligned with deferred terrain motion beneath LOD transparency.
+    ivec2 srPixel = ivec2(gl_FragCoord.xy);
+    float srDepth = texelFetch(depthtex1, srPixel, 0).r;
+    vec2 srUv = applyInverseJitter(gl_FragCoord.xy / vec2(viewWidth, viewHeight), vJitter);
+    vec3 srViewPos = screenToViewCanonical(srUv, srDepth);
+    bool srLodSurface;
+    bool srSurfaceValid = voxyScenePosition(gl_FragCoord.xy, vJitter, srDepth, false, srViewPos, srLodSurface);
+    if (srSurfaceValid && srLodSurface)
+        srDepth = min(voxyWindowDepth(srViewPos), 1.0 - 1.0 / 16777216.0);
+    // SR 外部深度接口要求原版投影域；只导出到颜色附件，不回写 depthtex。
+    outSrDepth = vec4(srDepth);
+    outSrMotion = texelFetch(colortex31, srPixel, 0);
+    if (srSurfaceValid && srLodSurface)
+        outSrMotion = vec4(voxySceneMotionVector(srUv, srViewPos), 0.0, 1.0);
+#endif
+#if defined(END) || (!defined(BOUNDARY_FOG) && !defined(AERIAL_PERSPECTIVE) && !defined(WATER_FOG))
     // 两雾宏全关：整 pass 透传旁路。不可 discard——本 pass 读改写 colortex6（DRAWBUFFERS:6 + uniforms
     // 采样器声明），引擎 ping-pong 把输出翻到另一份缓冲，discard 时那份从未被写入、保持帧头
     // clear 黑，composite_taa 读到全黑 → 黑屏（2026-09 实测修复）；透传写回保持翻转语义、
-    // colortex6 逐位直达。雾体留在 #else：直排其后会参与编译、引用已编译剔除的施加函数
+    // colortex6 保留非负颜色与 alpha。雾体留在 #else：直排其后会参与编译、引用已编译剔除的施加函数
     outColor = texelFetch(colortex6, ivec2(gl_FragCoord.xy), 0);
 #else
     // 深度 / 颜色采样 texelFetch 精确纹素（全屏 pass 逐像素与缓冲一一对应，与 deferred_init 同款
@@ -85,6 +112,9 @@ void main() {
     // 近景整像素在两雾的早退链免世界换算与 LUT fetch（aerial：距离 < AERIAL_FOG_START·far 起始
     // 门 fade = 0；boundary：距离因子 0），本 pass 常态成本 = 2 fetch + 闭式重建（1 div）+ 1 length
     vec3 viewPos = screenToViewCanonical(uv, depth);
+#ifdef VOXY
+    voxyVisibleSurfacePosition(gl_FragCoord.xy, vJitter, depth, viewPos, skyPixel);
+#endif
     vec3 color = texelFetch(colortex6, pixel, 0).rgb;
 #ifdef WATER_FOG
     // 水下雾（lib/water/fog.glsl 的 applyUnderwaterFog，方案移植自春v2 waterFog / underWaterFog）：
@@ -106,6 +136,8 @@ void main() {
 
     outColor = vec4(color, 1.0);
 #endif
+    // TAAU / SR (including DLSS) input: preserve HDR highlights and alpha, reject negative RGB.
+    outColor.rgb = max(outColor.rgb, vec3(0.0));
 }
 
 #endif

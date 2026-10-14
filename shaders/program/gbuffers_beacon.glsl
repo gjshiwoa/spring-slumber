@@ -9,12 +9,13 @@
 // fsh 前半 / vsh 后半，入口文件用 STAGE_FRAGMENT / STAGE_VERTEX 选择编译哪一半
 
 #include "/lib/common/globals/constants.glsl"
-#include "/lib/common/pipeline/varying_io.glsl"
 #include "/lib/common/globals/uniforms.glsl"
-#include "/lib/common/pipeline/material_texture.glsl"
-#include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/packing.glsl"
+#include "/lib/common/utils/space.glsl"
 #include "/lib/common/utils/noise.glsl"
+#include "/lib/common/pipeline/varying_io.glsl"
+#include "/lib/common/pipeline/material_texture.glsl"
+#include "/lib/common/pipeline/gbuffer_data.glsl"
 
 VARYING vec2 vTexCoord;
 VARYING vec4 vColor;
@@ -48,10 +49,12 @@ void main() {
 
     if (color.a < ALPHA_BEACON_CORE) {
         // 半透明外壳：手动合成进打包 albedo，背景 specular / 法线 / lm 原样写回
-        //（合成只作用 rgb——标记 a 通道整像素置空，同像素背景标记随重打包一并抹去）
-        vec3 previousColor = unpack2x16To4x8(previousMaterial.rg).rgb;
+        // 合成只作用 rgb；原版标记置空，Voxy 保留背景标记供 deferred 选择位置来源。
+        vec4 previousAlbedo = unpack2x16To4x8(previousMaterial.rg);
+        vec3 previousColor = previousAlbedo.rgb;
         color.rgb = mix(previousColor, color.rgb, color.a);
-        outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, MATERIAL_NONE)), previousMaterial.ba);
+        float marker = compositedMaterialMarker(previousAlbedo.a);
+        outMaterial = vec4(pack4x8To2x16(vec4(color.rgb, marker)), previousMaterial.ba);
         outDetail = texelFetch(gaux2, ivec2(gl_FragCoord.xy), 0);
     } else {
         // 不透明核心：自发光整像素写 gbuffer（光柱非植被，标记槽位置空）

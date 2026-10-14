@@ -30,6 +30,7 @@ uniform sampler2D depthtex1; // 深度缓冲（仅不透明几何，含手部；
 //      须先于本文件引入——各 program 的既有引入序已满足）----
 #if defined(SR_UPSCALE)
 uniform sampler2D colortex31; // SR 运动矢量缓冲（colortex31Format = RGBA16F）：rg = 本帧→上帧位移（渲染分辨率归一 uv 域、无抖动采样位）、b = 实体层标记（gbuffers_entities 写 1、deferred_init 读回保留实体 MV / 其余写相机 MV）。SR 只读不写
+uniform vec2 SRScaledViewportSize; // SR 实际整数渲染尺寸（以 vec2 提供），随窗口与档位更新
 uniform vec2 SRJitterOffset;  // SR 当前帧 jitter（渲染分辨率像素域，与 noise.glsl 的 Halton 表同域约定）：taaJitterSample 消费——applyTAAJitter / applyJitter / vJitter 全链自动跟进
 #endif
 
@@ -46,7 +47,7 @@ uniform float viewHeight; // 视口高度（像素）；同上
 uniform float far;        // 相机远平面（≈ 渲染半径 × √2 + 余量）：屏幕空间追踪阴影的渲染边界淡出锚点（shadow.glsl；GLSL 330 非保留字，各参考包通用名）
 uniform float frameTime;  // 帧间隔（秒）；自动曝光时间适应
 uniform float frameTimeCounter; // 游戏时间累计（秒，世界加载起算）；云层风场动画时基（lib/atmosphere/clouds.glsl）
-uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 31）与首帧守卫
+uniform int frameCounter; // 帧序号；TAA jitter 相位（frameCounter & 7）与首帧守卫
 
 // ---- TAA 重投影（lib/common/utils/noise.glsl + lib/post/taa.glsl + utils/space.glsl 上一帧换算）----
 uniform vec3 cameraPosition;         // 本帧相机世界坐标
@@ -81,5 +82,17 @@ uniform sampler2DShadow shadowtex0; // 全几何深度（含半透明）：基�
 // 未来 PCSS blocker search 共用的后路（春v2 同布置）
 uniform sampler2D shadowtex1;   // 仅不透明深度（裸值）
 uniform sampler2D shadowcolor0; // shadow pass 透射色（sRGB albedo，program/shadow.glsl 写入）；RGBA8：水面像素写 焦散×tint（rgb ≤1）+ a 通道水标记（SHADOW_COLOR_WATER_A，读取端 ×WATER_CAUSTICS_BOOST 重建 HDR）
+
+#ifdef VOXY
+uniform sampler2D colortex16;
+uniform sampler2D colortex17;
+// LOD 专属深度与配套逆矩阵；excludeLodsFromVanillaDepth = true。
+// 场景位置消费集中经 compat/voxy/scene.glsl，depthtex0/1 只重建原版几何。
+uniform sampler2D vxDepthTexOpaque;
+uniform sampler2D vxDepthTexTrans;
+uniform mat4 vxProjInv;
+uniform mat4 vxModelViewInv;
+uniform int vxRenderDistance;
+#endif
 
 #endif

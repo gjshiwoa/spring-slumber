@@ -68,6 +68,7 @@
 //（viewToWorldDirection / viewToRelativeWorld / screenToViewCanonical / relativeWorldToShadowScreen）、
 // lib/lighting/ambient.glsl（shadowTex1HardVisibility——直射门控的单 tap 读取端；唯一接入方
 // gbuffers_translucent 的既有平铺序已满足，ambient 位于 water 链之前）
+// VOXY 另需 compat/voxy/scene.glsl，从原版与 LOD 独立深度选择最近不透明背景位置。
 #ifndef LIB_WATER_SURFACE_GLSL
 #define LIB_WATER_SURFACE_GLSL
 
@@ -125,7 +126,8 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
         vec3 upV = mat3(gbufferModelView) * vec3(0.0, 1.0, 0.0); // 世界 up 的观察系向量
         vec3 dejitDir = normalize(screenToViewCanonical(dejitUv, 1.0)); // 未抖动像素中心视线
         float s = dot(upV, viewPos) / dot(upV, dejitDir); // 平面 dot(up,p) = dot(up,viewPos) 的射线参数
-        if (s > 0.0 && s < far * 4.0) viewPos = dejitDir * s;
+        float planarLimit = far * 4.0;
+        if (s > 0.0 && s < planarLimit) viewPos = dejitDir * s;
     }
 
     float distWorld = length(viewPos);
@@ -245,7 +247,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 距离衰减防远水拉扯；采样位钳在渲染子区域内（TAAU / SR_UPSCALE 区域外是上帧全屏残留）----
     vec2 viewSize = vec2(viewWidth, viewHeight);
 #if defined(TAAU) || defined(SR_UPSCALE)
-    vec2 regionMax = ceil(viewSize * EFFECTIVE_RENDER_SCALE) - 1.5;
+    vec2 regionMax = ceil(renderRegionSize()) - 1.5;
 #else
     vec2 regionMax = viewSize - 1.5;
 #endif
@@ -266,6 +268,10 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
         bgDepth = texelFetch(depthtex1, ivec2(samplePx), 0).r;
     }
     vec3 bgViewPos = screenToViewCanonical(sampleFullUv, bgDepth);
+    bool bgValid = bgDepth < 1.0;
+#ifdef VOXY
+    bgValid = voxyOpaqueBackgroundPosition(samplePx, jitterUv, bgDepth, bgViewPos);
+#endif
 
     // 折射有效性守卫（春v2 useRefract，2026-10 视角分向）：折射落点与水面点的连线须穿向透射
     // 介质一侧——水上视角背景在水下（世界 y < −0.01：拽到岸壁上沿 / 桥面等水面以上几何时退回
@@ -273,10 +279,14 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
     // 几何同样直采）。旧版只写水上条件：水下仰视的透射背景恒在水面以上 → 守卫恒触发 → 透过
     // 水面的折射扰动被整体禁用（水下无 Snell 窗波动，2026-10 检查发现修复）
     float bgDirY = dot(normalize(viewToWorldDirection(bgViewPos - viewPos)), vec3(0.0, 1.0, 0.0));
-    if (bgDepth < 1.0 && (underwater ? bgDirY < 0.01 : bgDirY > -0.01)) {
+    if (bgValid && (underwater ? bgDirY < 0.01 : bgDirY > -0.01)) {
         bgDepth = texelFetch(depthtex1, ivec2(gl_FragCoord.xy), 0).r;
         sampleFullUv = applyInverseJitter(gl_FragCoord.xy / viewSize, jitterUv);
         bgViewPos = screenToViewCanonical(sampleFullUv, bgDepth);
+        bgValid = bgDepth < 1.0;
+#ifdef VOXY
+        bgValid = voxyOpaqueBackgroundPosition(gl_FragCoord.xy, jitterUv, bgDepth, bgViewPos);
+#endif
         samplePx = gl_FragCoord.xy;
     }
     // 背景色 bilinear（折射扭曲的平滑过渡）；gaux1 = colortex4 背景快照（编码 × 解码见文件头——
@@ -346,8 +356,7 @@ vec3 shadeWaterSurface(vec3 viewPos, vec3 waterColorSrgb, vec2 lm,
         // 命中段雾（waterReflectionHitFog，头注见上）：命中 uv 重建命中点——去抖基底与折射背景
         // 同式（hitUv 为 buffer 域）；hitDepth 复用 SSR 验证的命中纹素深度，
         // 最终 UV 舍入跨纹素时由 SSR 内部补采样，保持旧深度取样语义
-        vec2 hitFullUv = applyInverseJitter(hitUv, jitterUv); // 去抖基底同式（hitUv 为 buffer 域）
-        vec3 hitViewPos = screenToViewCanonical(hitFullUv, hitDepth);
+        vec3 hitViewPos = waterSsrViewPosition(hitUv, hitDepth, jitterUv);
         waterReflectionHitFog(reflColor, viewPos, worldPos.y, hitViewPos, lm,
                               sunDirWorld, moonDirWorld, horizon, lutValid,
                               directIrradianceLit, skyAmbient);

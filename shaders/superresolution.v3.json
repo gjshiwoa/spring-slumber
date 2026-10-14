@@ -14,7 +14,11 @@
                 },
                 "inputs": {
                     "color":          { "enabled": true, "src": "autotex6",       "region": [0, 0, -1, -1] },
+#ifdef VOXY
+                    "depth":          { "enabled": true, "src": "autotex20",      "region": [0, 0, -1, -1] },
+#else
                     "depth":          { "enabled": true, "src": "noTranslucentDepthtex", "region": [0, 0, -1, -1] },
+#endif
                     "motion_vectors": { "enabled": true, "src": "autotex31",      "region": [0, 0, -1, -1] }
                 },
                 "outputs": {

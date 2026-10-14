@@ -12,6 +12,7 @@
 // 依赖由接入的 program 先行 include：constants.glsl / uniforms.glsl / utils/color.glsl（srgbToLinear）/
 //   utils/space.glsl（shadowDistort / relativeWorldToShadowScreen / remapSaturate）/
 //   utils/noise.glsl（temporalBayer64 / applyJitter）
+//   VOXY 另需 compat/voxy/scene.glsl（voxyOpaqueBackgroundPosition；先于本库引入）
 #ifndef LIB_SHADOW_GLSL
 #define LIB_SHADOW_GLSL
 
@@ -131,7 +132,7 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
 // 沿主光源方向对 depthtex1（不透明深度）的世界空间 ray march，一档追踪兼两职：近景补接触细节
 //（normal offset / PCF 模糊吃掉的小影）、远景接管（贴图 0.9D→D 淡出后为唯一阴影源，视距远超
 // shadowDistance）。机制春v2 谱系（其 screenSpaceShadow + deferred5 调用点）、公式自研重写——
-// 世界域均匀步（步距随长度自动缩放：近 trace 5 cm、远 trace 1.25 格，各自匹配该距离下亚像素化的
+// 世界域均匀步（步距随长度自动缩放：近 trace 5 cm、shadowDistance 处 1.25 格，更远线性增长，匹配亚像素化的
 // 细节尺度）+ 端点齐次插值投影（透视精确：矩阵乘对齐次坐标线性，clip(t) = P·(o,1) + t·P·(步向量,0)
 // 两端点出循环、每步 4 mad + 各自透视除——「端点插值掠射失真」只发生在对透视除**之后**的 uv/NDC
 // 线性插值〔屏幕域步进〕，对除法之前的 clip 4 维向量插值与逐点投影代数恒等）+ 3D 距离窗命中
@@ -142,7 +143,7 @@ vec3 sampleShadowVisibility(vec3 relativeWorldPos, vec3 normalWorld, float ndl, 
 // SSS 渐入 / min 合成在调用方 shadeSurface（lighting.glsl）。
 // viewPos    观察空间位置（shadeSurface 传入）
 // normalView 观图空间单位法线（起点法向偏移用）
-// distWorld  相机距离：驱动长度 / 起点偏移 / 厚度三条 remap 曲线
+// distWorld  相机距离：驱动长度 / 厚度 remap 与无上限起点偏移曲线
 float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld) {
     // 此处不可按「边界淡出带外恒 lit」提前早退：命中在循环内直接 return、不经尾部 fade，远场
     //（贴图覆盖外）接管影全部来自命中返回（FAR_SCALE 默认 1 下 miss 路径尾部整段恒等）——
@@ -151,17 +152,28 @@ float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld
     // 判定，同光源才自洽；晨昏切换黑过渡窗口内即便瞬时不一致，直射辐照度双 0、结果不可见
     vec3 lightDirView = normalize(shadowLightPosition);
 
-    // 距离 remap 族（春v2 谱系锚点、格）：长度近接触尺度 → 远山体尺度；起点偏移与厚度窗同向增长、
-    // 自身表面排除的裕度随窗宽自动放大；厚度四次曲线 x = (dist/D)⁴ 自下锚起陡升——紧口径保持到
-    // dist ≈ D·(5/D)^¼ ≈ 0.45D（中景接触细节要紧窗防薄几何误命中），接管区放到 THICKNESS_FAR
-    // 容山体起伏与屏幕域步距透视放大
-    const float DIST_ANCHOR = 5.0; // 长度 / 起点偏移的近端距离锚 + 厚度曲线的下锚（格，机制内建值）
-    float rayLength = remapSaturate(distWorld, DIST_ANCHOR, shadowDistance,
-                                    SHADOW_SS_LENGTH_NEAR, SHADOW_SS_LENGTH_FAR);
-    float startBias = remapSaturate(distWorld, DIST_ANCHOR, shadowDistance, 0.01, 0.1);
-    float thickness = remapSaturate(pow(distWorld / shadowDistance, 4.0),
+    // 近场沿用既有长度 / 窗口锚点；远场长度 / 窗口线性增长，偏移缓慢增长。
+    // 原版与 LOD 共用，固定步数不变。
+    const float DIST_ANCHOR = 5.0;
+    float distanceRamp = max(distWorld - DIST_ANCHOR, 0.0) / max(shadowDistance - DIST_ANCHOR, 1.0);
+    float distanceRatio = distWorld / shadowDistance;
+    float rayLength = mix(SHADOW_SS_LENGTH_NEAR, SHADOW_SS_LENGTH_FAR, distanceRamp);
+    // D 外改为平方根增长：仍随距离适配，但不让起点随追踪范围同比远离表面。
+    float biasRamp = distanceRamp > 1.0 ? sqrt(distanceRamp) : distanceRamp;
+    float startBias = mix(SHADOW_SS_START_BIAS_NEAR, SHADOW_SS_START_BIAS_FAR, biasRamp);
+    // D24 误差保护只估计原版投影能表示的距离；不能把原版量化误差继续外推到 LOD
+    // 远景（实际使用独立投影），否则二次增长的偏移会吞掉线性增长的追踪范围。
+    float nativeViewDepth = min(abs(viewPos.z), far);
+    float depthBias = SHADOW_SS_DEPTH_BIAS_ULPS * nativeViewDepth * nativeViewDepth /
+                      (8388608.0 * max(abs(gbufferProjection[3].z), 1e-6));
+    // 精度保护不能把薄片跨过去；沿用 D 处偏移作为该保护项的上限。
+    // 最终偏移仍由远场 biasRamp 缓慢增长，并非固定距离硬封顶。
+    startBias = max(startBias, min(depthBias, SHADOW_SS_START_BIAS_FAR));
+    // 近场保留四次整形；先钳输入再求幂，远场线性延续窗口、避免幂溢出。
+    float thickness = remapSaturate(pow(min(distanceRatio, 1.0), 4.0),
                                     DIST_ANCHOR / shadowDistance, 1.0,
-                                    SHADOW_SS_THICKNESS_NEAR, SHADOW_SS_THICKNESS_FAR);
+                                    SHADOW_SS_THICKNESS_NEAR, SHADOW_SS_THICKNESS_FAR)
+                      * max(distanceRatio, 1.0);
     float thicknessSq = thickness * thickness; // 距离窗平方形式：dot(d,d) < t² 与 distance < t 同谓词
 
     // 起点沿光向 + 法向各推 startBias（春v2 同款配对）
@@ -190,6 +202,16 @@ float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld
     vec2 bufJitter = applyJitter(vec2(0.0));
     vec2 halfScale = (applyJitter(vec2(1.0)) - bufJitter) * 0.5; // = 0.5·S（TAAU）/ 0.5
     vec2 bufOffset = halfScale + bufJitter;
+    // 场景深度统一按纹素中心重建；系数出循环，每步只做 mad。
+    vec2 bufferSize = vec2(viewWidth, viewHeight);
+    vec2 inverseHalfScale = 1.0 / halfScale;
+    vec2 sceneNdcScale = inverseHalfScale / bufferSize;
+    vec2 sceneNdcOffset = -bufOffset * inverseHalfScale;
+#if defined(TAAU) || defined(SR_UPSCALE)
+    vec2 bufferLimit = renderRegionScale();
+#else
+    vec2 bufferLimit = vec2(1.0);
+#endif
 
     for (int i = 0; i < SHADOW_SS_STEPS; i++) {
         float t = float(i) + dither;
@@ -202,12 +224,15 @@ float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld
         float invW = 1.0 / clip.w;
         vec2 ndc = clip.xy * invW;
 
-        // 出屏即 break——后续命中在屏外不可见，继续算无意义
+        // 到实际渲染区域边界即结束，避免采到 TAAU / SR 子区域外的清屏值。
         vec2 bufUv = ndc * halfScale + bufOffset;
-        if (any(lessThan(bufUv, vec2(0.0))) || any(greaterThan(bufUv, vec2(1.0)))) break;
+        if (any(lessThan(bufUv, vec2(0.0))) || any(greaterThanEqual(bufUv, bufferLimit))) break;
 
-        float depth = textureLod(depthtex1, bufUv, 0.0).r;
-        if (depth >= 1.0) continue;           // 天空 texel 不遮挡（TAAU 子区域外为每帧清屏值、同判）
+        ivec2 scenePixel = clamp(ivec2(bufUv * bufferSize), ivec2(0), ivec2(bufferSize) - 1);
+        float depth = texelFetch(depthtex1, scenePixel, 0).r;
+#ifndef VOXY
+        if (depth >= 1.0) continue; // 原版天空没有遮挡；VOXY 仍须检查独立 LOD 深度。
+#endif
         if (depth < TAA_HAND_DEPTH) continue; // 手部深度经 MC_HAND_DEPTH 重映射、重建失真会伪命中
 
         // 场景点重建与射线点同域（全视场 NDC + 本帧投影，与 deferred_init 位置重建同一去抖纪律）；
@@ -221,7 +246,13 @@ float screenSpaceShadowVisibility(vec3 viewPos, vec3 normalView, float distWorld
         // 积不完、冻结在历史里的是单相位噪声——纯二值版实测「严重抖动」的根因
         // p 仅命中判定需要（投影已走 clip 端点插值）：天空 / 手部 texel 早退在前、免算
         vec3 p = origin + t * stepVec;
-        vec3 scene = vec3(ndc * projXY, -1.0) * (projD / (depth * 2.0 - 1.0 + projC));
+        vec2 sceneNdc = (vec2(scenePixel) + 0.5) * sceneNdcScale + sceneNdcOffset;
+        vec3 scene = vec3(sceneNdc * projXY, -1.0) * (projD / (depth * 2.0 - 1.0 + projC));
+#ifdef VOXY
+        // 唯一来源差异：合并独立不透明 LOD 位置；复用循环外已算好的 jitter。
+        if (!voxyOpaqueBackgroundPosition(vec2(scenePixel) + 0.5, bufJitter, depth, scene))
+            continue;
+#endif
         if (dot(scene, scene) < dot(p, p) && dot(scene - p, scene - p) < thicknessSq)
             return max(float(i - SHADOW_SS_CONTACT_STEPS), 0.0) / float(SHADOW_SS_STEPS);
     }

@@ -12,10 +12,30 @@ vec2 remapLightmap(vec2 lm) {
 // 物品标记 → 次表面散射强度（shadeSurface / sampleShadowVisibility 的 sssStrength 入参，[0,1] 归一化）
 // 入参为 colortex4 解包 albedo 的 a 通道（标记 8bit 经 pack/unpack 往返，半 8bit 容差比较防边缘抖动）；
 // 植被硬编码取 VEGETATION_SSS_STRENGTH（唯一调效旋钮在此定档；标记来源 = block.properties 春v2 同款
-// 五族显式列表——列表外几何一律无 SSS），未标记一律 0（下式 else 分支自然覆盖），253~255 预留时在此
+// 五族显式列表——列表外几何一律无 SSS），未标记一律 0；Voxy 的 LOD 植被复用同一强度。扩展标记在此
 // 按材质定 0~1（春v2：SSS_INTENSITY × specularMap.b 同位职责）
 float materialSSSStrength(float marker) {
+#ifdef VOXY
+    if (abs(marker - MATERIAL_LOD_VEGETATION) < 0.5 / 255.0) return VEGETATION_SSS_STRENGTH;
+#endif
     return abs(marker - MATERIAL_VEGETATION) < 0.5 / 255.0 ? VEGETATION_SSS_STRENGTH : 0.0;
+}
+
+#ifdef VOXY
+bool isLodMaterialMarker(float marker) {
+    return abs(marker - MATERIAL_LOD) < 0.5 / 255.0
+        || abs(marker - MATERIAL_LOD_VEGETATION) < 0.5 / 255.0;
+}
+#endif
+
+// 手动颜色覆盖保留 LOD 来源：deferred_init 据此选择 Voxy 深度与法线坐标系。
+// 原版路径沿用 MATERIAL_NONE，避免颜色覆盖层继承植被 SSS。
+float compositedMaterialMarker(float previousMarker) {
+#ifdef VOXY
+    return isLodMaterialMarker(previousMarker) ? previousMarker : MATERIAL_NONE;
+#else
+    return MATERIAL_NONE;
+#endif
 }
 
 #endif

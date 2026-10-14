@@ -38,7 +38,7 @@ const float LIGHTMAP_SPAN  = 15.0 / 16.0;   // 原版光照图有效跨度（上
 // colortexNFormat 指令收进下方 /* */ 注释块（BSL / Complementary 同款生态标准形态：OptiFine / Iris
 // 均从注释扫描指令，格式名〔RGBA16 等〕不进编译器）。2026-10 实机修复：旧形态为真实 const +
 // 「const int RGBA16 = 0;」占位声明——引擎 const/option 预理会改写 / 移除数值型 const 声明，
-// 占位被吃掉后 colortexNFormat 行悬挂未定义格式名（undefined variable "RGBA16"，gbuffers_water
+// 占位被吃掉后 colortexNFormat 行悬挂未定义格式名（undefined variable RGBA16，gbuffers_water
 // 等程序编译失败）；注释块内指令不参与编译，结构性免疫。colortexNClear 为 bool 字面量、编译
 // 无害，保持真实 const（引擎从代码扫描，实测有效）
 /*
@@ -50,6 +50,16 @@ const int colortex6Format = RGBA16F; // 场景主颜色：放 colortex6（= gbuf
 const int colortex7Format = RGBA16F; // 杂项数据（左下角杂项簇，布局见 SKYBOX_LUT_SIZE / SKYVIEW_LUT_* / AERIAL_LUT_ORIGIN_X）：云层天空盒 256×256（八面体，反射路径烘焙云）+ 天空 view LUT 200×200（日 / 月半区各 200×100）+ 曝光槽位 1 texel + aerial 透视 LUT 64×192（(460,0) 起）
 const int colortex31Format = RGBA16F; // SR 超分运动矢量（SR mod 注入宏门控引用、未装 SR 时零引用零分配）：rg = 本帧→上帧位移（渲染分辨率归一 uv 域、无抖动采样位）、b = 实体层标记（gbuffers_entities 写 1，deferred_init 读回保留 / 其余写 0）。浮点格式（位移 ∈ [-1,1] 带符号、8bit 量化不可用）；默认 clear = true（帧头清 0 = 标记复位，防上帧实体标记跨帧残留）
 */
+// Voxy 专用附件：关闭时连格式 / 清屏指令一起移除。
+#ifdef VOXY
+/*
+const int colortex20Format = R32F; // SR: merged native/LOD depth; referenced only by VOXY + SR.
+const int colortex16Format = RGBA16F;
+const int colortex17Format = RGBA32F;
+*/
+const bool colortex16Clear = true;
+const bool colortex17Clear = true;
+#endif
 const bool colortex3Clear  = false;   // 历史跨帧存活；仅 composite_taa（composite3）读写（单程序独占 ping-pong，不依赖 flip.*）
 const bool colortex7Clear = false;   // 槽位内容跨帧存活；composite12 唯一写入、光栅区域整写并透传非槽位像素（协议见 AGENTS.md / exposure.glsl）
 
@@ -262,8 +272,8 @@ const float CLOUDS_2D_BRIGHTNESS_BASE = 0.6; // 定标基值（非玩家旋钮�
 // 渲染边界处的融接雾：远处地形 / 水面 / 天空溶进地平线色、视距边缘无接缝；非物理雾（无光照
 // 方向性 / 高度衰减，纯边界融接）。开关宏与数值常量分离（TAAU 同纪律）；删宏 = fog.glsl 编译为空 +
 // composite_fog 整 pass 透传旁路（colortex6 同位置 fetch 原样写回——discard 会因引擎缓冲翻转
-// 黑屏，见 composite_fog.glsl）；末地经 DIM_NO_ATMOSPHERE 不定义（无雾极简档、composite2 入口
-// 不创建），**下界经 FOG_UNIFIED_COLOR 恢复定义并走统一雾色分支**（2026-10，见下方统一雾分区）
+// 黑屏，见 composite_fog.glsl）；末地经 DIM_NO_ATMOSPHERE 不定义（无雾极简档、composite2
+// 仅透传并钳制负 RGB，保证 TAAU / SR 输入非负），**下界经 FOG_UNIFIED_COLOR 恢复定义并走统一雾色分支**（2026-10，见下方统一雾分区）
 #if !defined(DIM_NO_ATMOSPHERE) || defined(FOG_UNIFIED_COLOR)
 #define BOUNDARY_FOG
 #endif
@@ -337,6 +347,11 @@ const float BEACON_CORE_EMISSIVE = 240.0 / 255.0; // 核心自发光强度（写
 // ---- 物品标记（colortex4 打包 albedo 的 a 通道 8bit 槽位）----
 // a 通道在 cutout 判定后职责已尽、复用为物品类型标记，随 pack4x8To2x16 一同压缩（读取端
 // unpack2x16To4x8(...).a × 255 判定）；编号对齐春雷 objectMarker 系（251 起），253~255 预留显式标记扩展
+#ifdef VOXY
+const float MATERIAL_LOD = 252.0 / 255.0;
+const float MATERIAL_LOD_VEGETATION = 253.0 / 255.0;
+#endif
+
 const float MATERIAL_NONE       = 0.0;           // 无标记；texcolor 经半透明混合的程序（entityColor / 手动合成）混合只影响 rgb，a 整像素置空
 const float MATERIAL_VEGETATION = 251.0 / 255.0; // 植被：block.properties 显式列表 → mc_Entity → vsh 判定（春v2 IDMapping 同款五族，见 material.glsl 的 isVegetationId）；252 空缺、253~255 预留
 
@@ -454,16 +469,41 @@ const vec2 EXPOSURE_SAMPLE_KERNEL[16] = vec2[16](
 
 // ---- TAA（lib/common/utils/noise.glsl + lib/post/taa.glsl）----
 // 内置 TAA / TAAU 常量混合基线（2026-10-11）：有效历史固定注入 3% 当前帧。
-// 深度仅供重投影 / 诊断，不调权也不改变颜色钳制；越界 / 首帧仍直接当前帧。
-// 删除本宏恢复旧自适应档（速度 / 深度 / 相位 / Karis / 手部下限），便于实机 A/B。
+// 默认唯一深度区间拒绝历史；固定TAAU另放宽颜色。关区间宏时为纯颜色档。
+// 删除本宏切换自适应混合（速度 / 相位 / Karis / 手部下限），共用同一深度区间。
 #define TAA_FIXED_BLEND
 
 // TAA 诊断 A/B 档：源码手动改值，不列入游戏菜单；SR 接管时自动旁路。
-// 0 = 正常；1 = 深度置信（红拒绝 / 绿接受）；2 = 最终当前帧权重（白 = 1）；
-// 3 = 历史钳制改变量（Reinhard-YCoCg 域 × TAA_DEBUG_CLIP_GAIN）。
+// 0 = 正常；1 = 深度置信（红拒绝 / 绿接受，区间档显示 min/max 置信）；2 = 最终当前帧权重（白 = 1）；
+// 3 = 总历史钳制改变量；4 = 极值硬盒改变量；5 = 方差盒软修正改变量。
+// 三者均为 Reinhard-YCoCg 域距离 × TAA_DEBUG_CLIP_GAIN（白色可能饱和）。
 // 诊断标量写 colortex6 闲置 alpha；RGB / 历史 / 测光保持正常，final 绕过后处理显示。
-#define TAA_DEBUG_VIEW 0 // [0 1 2 3]
+#define TAA_DEBUG_VIEW 0 // [0 1 2 3 4 5]
 const float TAA_DEBUG_CLIP_GAIN = 16.0;
+
+// 2026-10-14 TAAU 高反差闪烁 A/B：历史用原始九点极值，当前色仍用相位去振铃盒。
+// 删除本宏恢复原先共用边界；仅源码诊断，不列入菜单。原生 TAA 不受影响。
+#define TAAU_HISTORY_RAW_BOUNDS
+
+// 2026-10-14 debug 4 与闪烁重合后的 A/B：仅历史硬盒改为逐分量 clamp。
+// 删除此宏恢复径向硬裁剪；原生 TAA 与方差盒仍走原裁剪。
+#define TAAU_HISTORY_COMPONENT_CLAMP
+
+// 高反差历史盒小幅余量 A/B：平坦区为零，只影响历史，不改重建去振铃。
+// 工作域为曝光归一化 Reinhard-YCoCg；删宏回上一轮严格边界。
+#define TAAU_HISTORY_BOUND_SLACK
+const float TAAU_HISTORY_MARGIN_SCALE = 0.03;
+const float TAAU_HISTORY_MARGIN_FLOOR = 0.003;
+const float TAAU_HISTORY_MARGIN_MAX = 0.02;
+
+// ITT3.2 历史 3x3 深度 min/max 拒绝思想，转换为本包上一帧线性观察深度域。
+// 所有内置 TAA 档共用唯一深度确认，中心先归约、接受后早退。
+// 原生 / 1x 为 3x3；TAAU 按 ceil(1/S) 扩圈（0.5~0.9 档 5x5），1~25 次读取。
+// 仅固定 TAAU 放宽颜色；删宏为不读历史深度的纯颜色档，不新增附件。
+#define TAAU_DEPTH_RANGE_CLIP
+const float TAAU_DEPTH_RANGE_TOLERANCE = 0.01; // 区间外相对深度 1% 接受、2% 完全拒绝
+const float TAAU_DEPTH_COLOR_GAMMA = 2.0; // 2026-10-15 可信历史扩张系数从 4.0 降至 2.0，收紧颜色 clip
+const float TAAU_DEPTH_COLOR_Y_HEADROOM = 0.001; // Reinhard 亮度上界防逆映射放大
 
 // TAAU 轻量重建与历史修正（2026-10）：不新增元数据缓冲。
 // 下列速度 / 深度 / Karis 参数在 TAA_FIXED_BLEND 下仅为旧自适应回退或诊断保留。
@@ -473,39 +513,23 @@ const float TAA_MOTION_HIGH = 8.0;
 const float TAA_RECTIFY_STABLE = 0.35; // 仅方差盒软修正；样本极值盒仍硬约束
 const float TAA_RECTIFY_CHANGE_LOW = 0.05; // Reinhard-YCoCg 域颜色差异
 const float TAA_RECTIFY_CHANGE_HIGH = 0.25;
-// TAAU 轮廓稳定：仅可信低速高反差区域放宽方差盒，不放宽真实样本极值。
+// 自适应档仅可信低速高反差区域提高方差gamma；固定TAAU的深度验证放宽见上方。
 const float TAAU_EDGE_CONTRAST_LOW = 0.08; // 曝光归一化 Reinhard 亮度跨度
 const float TAAU_EDGE_CONTRAST_HIGH = 0.25;
-const float TAAU_EDGE_CLIP_GAMMA = 3.0; // 高反差边缘的方差盒上限；快速运动 / 深度失配回基础值
-const float TAAU_DEPTH_SUPPORT_LOW = 0.05; // 历史双线性足迹的最小贡献；零权重邻居不得救活历史
-const float TAAU_DEPTH_SUPPORT_HIGH = 0.25; // 足迹内显著贡献的匹配深度可保留历史
-const ivec2 taaHistoryOffsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+const float TAAU_EDGE_CLIP_GAMMA = 2.0; // 2026-10-15 高反差边缘系数从 3.0 降至 2.0，与基础 / 深度可信档统一
 const float TAAU_STAT_WEIGHT = 1.5; // exp2 距离统计权重，九样本与重建共享
 const float TAAU_CONFIDENCE_POWER = 1.0; // 九样本正权重置信度；原生档置信度恒为 1
 const float TAA_JITTER_SCALE = 1.0;  // jitter 幅度缩放（1.0 = 满幅 ±0.5 渲染纹素，即 1 纹素跨度；降低可换锐度）
-// Halton(2,3) 32 相位序列，像素域 [-0.5, 0.5]（春雷同族、扩到 32 项）；查表纯 GLSL 实现，不依赖
-// properties 自定义 uniform（旧版 OptiFine 兼容）。相位数是 TAAU 低渲染比的目标网格覆盖数：
-// 16 相位在 S=0.5 下按 AGENTS 实测定档不足（FSR2 低比例换 72 相位同因），32 项查表零成本补齐；
-// 原生档（S=1）16/32 观感无差，统一用本表
-const vec2 TAA_JITTER_SAMPLES[32] = vec2[32](
+// Halton(2,3) 8 相位序列（索引 1~8 减 0.5），每 8 帧循环。
+// 2026-10-15 按用户要求由 32 相位缩短至 8；保留像素域幅度与投影 / 去抖关系。
+// 查表纯 GLSL 实现，不依赖 properties 自定义 uniform（旧版 OptiFine 兼容）。
+const vec2 TAA_JITTER_SAMPLES[8] = vec2[8](
     vec2( 0.0,    -0.16666667), vec2(-0.25,    0.16666667),
     vec2( 0.25,   -0.38888889), vec2(-0.375,  -0.05555556),
     vec2( 0.125,   0.27777778), vec2(-0.125,  -0.27777778),
-    vec2( 0.375,   0.05555556), vec2(-0.4375,  0.38888889),
-    vec2( 0.0625, -0.46296296), vec2(-0.1875, -0.12962963),
-    vec2( 0.3125,  0.20370370), vec2(-0.3125, -0.35185185),
-    vec2( 0.1875, -0.01851852), vec2(-0.0625,  0.31481481),
-    vec2( 0.4375, -0.24074074), vec2(-0.46875,  0.09259259),
-    vec2( 0.03125, 0.42592593), vec2(-0.21875, -0.42592593),
-    vec2( 0.28125, -0.09259259), vec2(-0.34375,  0.24074074),
-    vec2( 0.15625, -0.31481481), vec2(-0.09375,  0.01851852),
-    vec2( 0.40625,  0.35185185), vec2(-0.40625, -0.20370370),
-    vec2( 0.09375,  0.12962963), vec2(-0.15625,  0.46296296),
-    vec2( 0.34375, -0.48765432), vec2(-0.28125, -0.15432099),
-    vec2( 0.21875,  0.17901235), vec2(-0.03125, -0.37654321),
-    vec2( 0.46875, -0.04320988), vec2(-0.484375, 0.29012346)
+    vec2( 0.375,   0.05555556), vec2(-0.4375,  0.38888889)
 );
-const float TAA_HISTORY_SHARPNESS   = 0.65; // 历史 Catmull-Rom 锐化系数（春雷 0.6 / 春v2 低配版 0.8 之间）
+const float TAA_HISTORY_SHARPNESS   = 0.6; // 历史 Catmull-Rom 锐化系数（2026-10-15 从 0.65 下调至 0.5 后按反馈回调至 0.6）
 const float TAA_CLIP_GAMMA          = 2.0;  // 方差钳制 γ 基础值（深度置信度高时用）：拉宽 μ±γσ 盒 = 提高历史通过率、少被截向当前邻域（输出更贴稳定的历史）；与样本极值盒交配合有天然上界——γ 放宽到超出双峰 σ 后 binding 侧落到极值盒、历史最多放宽到邻域真实样本，鬼影风险不随 γ 无限增长。自 1.75 抬（2026-10 远处物体闪烁 / 反射噪点反馈）：远物邻域统计双峰 σ 窄、历史被截即 Karis 失效（clipDistance=0 不再压注入）→ 恒定注入闪烁，抬 γ 让历史更常稳居盒内、Karis 防闪随之激活（双重收益）
 const float TAA_CLIP_DISTANCE_GAIN  = 5.0;  // Karis 距离防闪增益（Kappa / Photon 同式同值）：历史稳居钳制盒内时把当前帧权重压向 0——恒定注入相位漂移的当前帧样本是静止细节闪烁的主源；工作域已含曝光归一化，距离不再乘曝光
 const float TAA_OFFCENTER_REJECTION = 0.15; // 偏心拒绝强度（Zombye，Kappa / Photon / c13 同族取 0.25）：重投影落点偏离纹素中心（=有运动）时按比例抬高当前帧权重，削运动拖影 / 运动糊；自 0.25 下调——运动中的逐像素抬权幅度即逐像素注入方差，是移动 shimmer 的放大器，下调换边缘稳定（代价同 TAA_BLEND_MOTION）
@@ -516,9 +540,7 @@ const float TAA_BLEND_DISOCCCLUSION = 0.4;  // 独立解遮挡更新下限系数
 const float TAA_BLEND_MIN           = 0.01; // 当前帧权重下限（历史权重上限 0.99）；置信度 / Karis 防闪在其后施加、允许压破下限（下限防的是「无信息时不信任历史」，防闪是「有信息时明确信任历史」）。自 0.02 降（2026-10 同批反馈）：SSR 反射等过程噪声源（bayer 相位翻转的命中判定）靠历史主导平均，下限即其稳态噪声地板
 const float TAA_BLEND_HAND_MIN      = 0.1;  // 手部当前帧权重下限（防手部拖影）
 const float TAA_HAND_DEPTH          = 0.56; // NDC 深度阈值：小于此值视为手（BSL / Photon 同值）：TAA 手部路径判定 + 屏幕空间追踪阴影的遮挡者排除（shadow.glsl）——两处消费者成对维护
-const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：历史 a 通道深度钳制与天空像素哨兵——天空↔天空 |Δ|=0 满置信、天空↔几何显式归零
-const float TAA_DEPTH_CONF_EDGE0    = 0.02; // 深度置信 smoothstep 下沿（重投影深度 vs 历史 a 通道的相对差）
-const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
+const float TAA_DEPTH_SENTINEL      = 65504.0; // 半精度上限：锚点深度上限 / 天空哨兵；历史几何区间排除此值，天空按邻域存在性
 
 // ---- TAAU 时域上采样（子区域渲染 + composite_taa 解析上采样；关闭使用原生十字统计）----
 // 机制 = c13 / Bliss 子区域缩放 + Photon / Kappa「TAA pass 即上采样器」（全貌见 AGENTS.md）：
@@ -529,11 +551,11 @@ const float TAA_DEPTH_CONF_EDGE1    = 0.10; // 上沿
 // 预处理 #if 不支持浮点比较，开关宏与数值常量分离
 #define TAAU
 #ifdef TAAU
-// 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；完整补抖 + 置信度门控 + 32 相位
+// 渲染比例 S（像素成本 ×S²：0.75 → ×0.5625、0.7 → ×0.49、0.5 → ×0.25）；完整补抖 + 置信度门控 + 8 相位
 // 修复后 0.5 可用，仍嫌软回 0.75；<0.5 不建议（目标像素网格更稀、上采样核欠采样）
 #define RENDER_SCALE 0.7 // [0.5 0.6 0.7 0.8 0.9 1.0]
 const float TAAU_KERNEL_BIAS = 1.35; // 3x3 径向支撑：必须在 [4/3,sqrt(2)) 内，换中心时外侧权重为零
-// TAA_FIXED_BLEND 下直接采用本值，不再受相位 / 深度 / 速度 / Karis 调制。
+// 固定档通过深度验证时采用本值；区间拒绝另抬至1，不受速度 / 相位 / Karis 调制。
 const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档 TAA_BLEND_BASE 同值同调，2026-10 自 0.05 降——远处闪烁 / 反射噪点反馈，见其注释）：当前帧样本是相位噪声的注入端、base 即注入下限——历史权重 0.97，静止细节更依赖时间累积（配合相位置信度与历史防闪）；出现拖影 / 收敛慢回抬 0.08~0.12
 #endif
 
@@ -558,7 +580,8 @@ const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档
 //      支持 jitter 时该 uniform = 0 = 不抖（此时本包 TAA 已旁路、自抖无解析端，宁可不抖）
 //   ③ 抗锯齿 / 上采样：SR 算法族（FSR2 / DLSS / XeSS…）自带时域累积，composite_taa（composite3）
 //      整 pass 透传旁路（colortex3 历史停写）；SR 在 composite3 前触发点读 colortex6（雾后线性
-//      HDR）+ noTranslucentDepthtex + colortex31 运动矢量、写回全屏 upscaled 色彩
+//      HDR）+ 深度（原版 noTranslucentDepthtex；VOXY 的 autotex20 合并独立 LOD 位置）+ colortex31
+//      运动矢量、写回全屏 upscaled 色彩
 //   ④ 末级锐化：final 的 RCAS 段在消费点条件跳过（SR 算法族自带锐化，RCAS 是给内置 TAA/TAAU
 //      软感补的末级锐化、叠加过锐）——RCAS 宏本身不动（用户选项，跳过位置与缘由见其段注释）
 // 运动矢量（写入端见 deferred_init / gbuffers_opaque_entities，取值实现 space.glsl 的
@@ -571,7 +594,9 @@ const float TAAU_BLEND_BASE = 0.03; // TAAU 当前帧基础权重（与原生档
 #if defined(SR_UPSCALE) && defined(SR_IRIS_EXT_VELOCITY) && SR_IRIS_EXT_VELOCITY == 1
 #define SR_ENTITY_VELOCITY
 #endif
-// 生效渲染比例：子区域机制全链消费的派生宏（非选项、不进 shaders.properties）。SR 接管 = SR 档位；
+// 名义渲染比例（非选项、不进 shaders.properties）。Voxy JSON 用字面值建立整数视口；
+// SR 投影 / 重建改由 noise.glsl 的 renderRegionScale() 读取 SRScaledViewportSize，避免小数尺寸失配。
+// SR 接管 = SR 档位；
 // 否则镜像 RENDER_SCALE 选项值（TAAU 删宏时选项行随之消失、本宏不定义——消费点全在
 //「TAAU || SR_UPSCALE」门内，未定义即无消费，任何漏网引用会在编译期暴露）
 #ifdef SR_UPSCALE
@@ -747,10 +772,15 @@ const float SHADOW_COLOR_WATER_TEST = 0.75; // 读取端水标记判定阈（tex
 #ifdef SHADOW_SCREEN_SPACE
 const int   SHADOW_SS_STEPS          = 8;    // 步数：temporalBayer64 64 相位 × TAA 补采样密度（Photon 10 / Bliss·Kappa 16 / 春v2 5，居中）；步序同时是命中软化分档（N 越大帧内梯度越细）；极低配降 6
 const int   SHADOW_SS_CONTACT_STEPS  = 3;    // 接触死区步数 K：命中步序 i ≤ K 不软化、整像素全影——近端 trace 的职责是把贴图被 normal offset 浮空带（SHADOW_BIAS_NORMAL 0.05 格起、掠射背光放大至 ~0.11 格）与 PCF 模糊吃掉的接触影满强度补回，软化补不上；两者合计的接缝带至 ~17 cm，K=2〔死区 ~10 cm〕实测补不满、抬到 3（死区 ≈ (K+1)×步长 ≈ 20 cm 覆盖，随 trace 长度自动缩放）；再抬的代价 = 软化段最大深度变浅（(N−1−K)/N）、接管区全影范围扩大
+// 起点偏移：5 格近端与 shadowDistance 锚点；D 外平方根增长，保留薄遮挡。
+const float SHADOW_SS_START_BIAS_NEAR = 0.01;
+const float SHADOW_SS_START_BIAS_FAR  = 0.03;
+// D24 误差按距离平方估计；推移量限于 FAR 偏移，避免精度保护抹掉薄遮挡。
+const float SHADOW_SS_DEPTH_BIAS_ULPS = 2.0;
 const float SHADOW_SS_LENGTH_NEAR    = 0.4;  // 近距追踪长度（格，dist ≤ 5 格锚点）：接触阴影主尺度（楼梯棱 / 草根）；长度同时定软化段深浅——死区外命中返回 (i−K)/N，抬长 = 同一遮挡落更早步序 = 更深
-const float SHADOW_SS_LENGTH_FAR     = 10.0; // shadowDistance 处长度（格，D 外饱和）：远景接管的山体尺度；嫌远景噪声 / 肥影先降此值、嫌步序软化后接管影整体偏浅则抬此值
+const float SHADOW_SS_LENGTH_FAR     = 10.0; // shadowDistance 处长度（格，D 外继续线性增长）：远景接管的山体尺度；嫌远景噪声 / 肥影先降此值、嫌步序软化后接管影整体偏浅则抬此值
 const float SHADOW_SS_THICKNESS_NEAR = 0.1;  // 命中窗 3D 距离基数（格）：近中景紧窗防薄几何自命中
-const float SHADOW_SS_THICKNESS_FAR  = 10.0; // D 处命中窗上限（格）：接管区容表面起伏 + 步距透视放大；自春v2 的 20 收紧——本包无雾，远场掠射退化（径向序对海拔二阶不敏感、命中退化为噪声翻转）直接可见，肥窗放大边界描黑
+const float SHADOW_SS_THICKNESS_FAR  = 10.0; // D 处命中窗（格，D 外按距离比例线性增长）：接管区容表面起伏 + 步距透视放大；自春v2 的 20 收紧——本包无雾，远场掠射退化（径向序对海拔二阶不敏感、命中退化为噪声翻转）直接可见，肥窗放大边界描黑
 const float SHADOW_SS_EDGE_START     = 0.75; // 渲染边界淡出起点（×far，相机远平面 ≈ 渲染半径）：远边界掠射带的命中判定退化为噪声、经 TAA 平均成沿边界的渐变描黑——自此处向边界淡出（修复实测问题）
 const float SHADOW_SS_EDGE_END       = 0.9;  // 渲染边界淡出终点（×far）：边界带回退无影（本效果接入前的原状态，优于描黑）；接管主体 0.9D → EDGE_START·far 不受影响，嫌边界仍有暗带先抬 START
 const float SHADOW_SS_NEAR_BOUNDARY  = 0.7;  // 近/远景分界（×D）：近景不 trace SSS（保透光观感）、远景 trace（保接管，树冠在 0.9D 外必须有影）
@@ -902,7 +932,7 @@ const float WATER_REFL_SKY_GATE_LOW   = 0.1;  // 重映射下界：低于此天�
 const float WATER_REFL_SKY_GATE_GAMMA = 2.2;  // 感知域 → 线性域幂（srgbToLinear 同值）
 // SSR = 2D SSPT 屏幕域 march（春雷 sstTrace 移植，机制见 lib/water/ssr.glsl「屏幕空间反射」段）
 // 2026-10-07：步距减半（20 → 40）实测改善反射发虚，保留密度并优化精修重复读取 / 无效验证。
-const float WATER_SSR_SHORT_EDGE_STEPS = 40.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 视口最短边 ÷ 本值——1080p 基准 → 27 px/步（旧 20 档为 54 px/步；角度自适应见下方开关）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 92（子区域段更短、再 × EFFECTIVE_RENDER_SCALE），与分辨率无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
+const float WATER_SSR_SHORT_EDGE_STEPS = 40.0; // SSR 步距定标（单一整体调节变量）：步距（buffer 纹素）= 实际渲染区域最短边 ÷ 本值（含 TAAU / SR 比例）——1080p 基准 → 27 px/步（旧 20 档为 54 px/步；角度自适应见下方开关）；抬大步距变小（更密更贵）、压小步距变大（更省更粗）。march **不限步数**、走完可见段到屏幕 / 视锥边缘为止；步距随分辨率等比 ⇒ 最坏步数 ≈ 对角线 ÷ 步距 ≈ 2.3 × 本值 ≈ 92（射线与步距统一随实际渲染比例缩放），与分辨率 / 渲染比例无关；temporalBayer64 64 相位 × TAA 时间累积收敛缝隙
 // 角度自适应步距 A/B（2026-10-07）：掠视保持基准，较正视最多放粗 25%。
 // 角度只用调用方的稳定面法线；不依赖动画波面法线，避免步距随波场逐帧摆动。
 // 注释开关只关闭角度自适应；与短段最低采样开关均关闭时回固定 40 档。仅源码诊断，不列设置。
